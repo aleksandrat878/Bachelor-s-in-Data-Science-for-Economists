@@ -6,5 +6,5 @@ Highlights include:
 - Finance and international economics applications
 - Undergraduate thesis research
 - Real-world academic projects completed at UNSW
-- 
+  
 This repository demonstrates practical, data-driven approaches to economic and financial problem-solving.
