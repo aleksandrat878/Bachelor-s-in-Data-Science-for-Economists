@@ -1,0 +1,1164 @@
+---
+title: "Can we Predict Poverty Risk?"
+subtitle: "A Data-Driven Approach to Identifying Vulnerable Populations and Providing Targeted Assistance"
+author: "Data Science Lab"
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    toc: true
+    number_sections: true
+---
+# 1 Setup and Data Loading
+
+## 1.1 Setting global options and libraries
+```{r setup, include=FALSE}
+
+# Global options: show code, hide messages/warnings, and enable caching for long-running computations
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache = TRUE)
+
+# Load necessary packages
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(janitor)
+library(caret)
+library(glmnet)
+library(ISLR)
+library(randomForest)
+library(xgboost)
+library(car)
+library(lmtest)
+library(sandwich)
+library(boot)
+library(iml)
+library(patchwork)
+library(knitr)
+library(kableExtra)
+library(xgboost)
+library(tidyr)
+library(tibble)
+library(DT)
+
+# Source helper functions from external scripts
+source("generate_formulas.R")
+```
+
+
+## 1.2 Loading the dataset
+```{r}
+# Read in the dataset from an Excel file
+poverty <- read_excel("train_values.xlsx")
+head(poverty)
+```
+
+
+# 2. Data Cleaning and Preprocessing
+```{r}
+# Removed the first column (row_id)
+poverty <- poverty[, -1]
+
+# Removed columns with many missing values
+poverty <- poverty %>% 
+  select(-bank_interest_rate, -mm_interest_rate, -mfi_interest_rate, -other_fsp_interest_rate)
+
+# Standardize column names
+poverty <- clean_names(poverty)
+
+# Remove empty rows and columns
+poverty <- select_if(poverty, ~ !all(is.na(.)))
+
+# Remove duplicate rows
+poverty <- distinct(poverty)
+poverty
+
+# Converting logical (TRUE/FALSE) responses to numeric (0/1)
+poverty[] <- lapply(poverty, function(x) if(is.logical(x)) as.numeric(x) else x)
+
+# Display statistical summary of the dataset
+summary(poverty)
+```
+
+# 3. Creating Age Groups
+```{r}
+# Separating 'age' into three groups based on quartile distribution
+poverty$age_group <- cut(
+  poverty$age, 
+  breaks = c(15, 25, 45, 115), 
+  labels = c(1, 2, 3), 
+  right = TRUE
+)
+
+# Categories: 
+## [1] young (15–25 years) → Covers the Min to 1st Quartile (Q1) 
+## [2] middle-age (26–45 years) → Covers the Q1 to 3rd Quartile (Q3),
+## [3] older (46+ years) → Covers the Q3 to Max
+```
+
+# 4. Preparing Dataset for Lasso Regression
+## 4.1 Splitting Data into Training, Validation, and Test Sets
+```{r}
+# Remove observations with missing poverty probabiliry
+poverty1 <- poverty %>% filter(!is.na(poverty_probability))
+nrow(poverty1) # Number of rows in the dataset - Should be 12598
+
+# Set seed() function to ensure randomization and reproduction 
+set.seed(540)
+
+# Define the training partition (approx. 50% of the data)
+train_index <- createDataPartition(
+  poverty1$poverty_probability, 
+  p = 0.5,
+  list = FALSE, 
+  times = 1)
+
+# Split the data using the training partition to obtain training data
+poverty1_train <- poverty1[train_index,]
+
+# Remainder of the split is the validation and test data (still) combined 
+poverty1_val_and_test <- poverty1[-train_index,]
+
+# Further split into validation and test set of the remaining 50% of the data.
+val_index <- createDataPartition(
+  poverty1_val_and_test$poverty_probability,
+  p = .6, 
+  list = FALSE, 
+  times = 1)
+
+poverty1_valid <- poverty1_val_and_test[val_index,]
+poverty1_test  <- poverty1_val_and_test[-val_index,]
+
+# Summary of the data (100%) split:
+## Training (~50%)
+## Validation (~30%)
+## Test (~20%)
+```
+
+## 4.2 Visualization of the Datasets using a Histogram
+```{r}
+#Visualization of the distribution of the variable poverty_probability across the datasets that were made in the previous coding
+ggplot() + 
+  geom_histogram(data = poverty1_train, mapping = aes(x = poverty_probability), alpha = 0.3, colour = "Blue") + 
+  geom_histogram(data = poverty1_valid, mapping = aes(x = poverty_probability), alpha = 0.3, colour = "Red") + 
+  geom_histogram(data = poverty1_test, mapping = aes(x = poverty_probability), alpha = 0.3, colour = "Orange") + 
+  ggtitle("Distribution of Poverty Probability Across Datasets")
+```
+
+# 5. Model Training and Seletion
+```{r}
+## 5.1 Define a Function to Compute MSE
+
+# Function to compute Mean Squared Error (MSE) function for model evaluation
+lm_mse <- function(formula, train_data, valid_data) {
+  # Extract the dependent variable name
+  y_name <- as.character(formula)[2]
+  # Extract the true values from the validation data
+  y_true <- valid_data[[y_name]]
+  
+  # Train a Linear Model (LM) using the formula on training data
+  lm_fit <- lm(formula, train_data)
+  
+  # Predict poverty probability on validation data
+  y_pred <- predict(lm_fit, newdata = valid_data)
+  
+  # Compute and return the Mean Squared Error (MSE)
+  mean((y_true - y_pred)^2)
+}
+
+## 5.2 Generate Formulas for Model Training
+
+# Get all column names from the dataset and remove the target variable
+x_vars <- setdiff(colnames(poverty1), "poverty_probability")
+
+# Generate formulas for models with up to 3 predictor variables
+formulas <- generate_formulas(p = 3, x_vars = x_vars, y_var = "poverty_probability")
+head(formulas)
+
+# Check how many formulas were generated
+length(formulas) #[1] 26235
+
+## 5.3 Compute MSE for all 3-predictor Models
+
+# Use purrr::map_dbl to compute MSE for each formula efficiently
+mses <- map_dbl(formulas, ~ lm_mse(as.formula(.x), poverty1_train, poverty1_valid))
+
+# Select the formula with the lowest MSE
+best_3_preds <- formulas[which.min(mses)]
+best_3_preds
+
+## 5.4 Generate Models with Different Numbers of Predictors
+
+# Generate formulas with different complexity levels (1, 2, and 4 predictors)
+
+# Generate formulas for 1, 2, and 4 predictors
+formulas_1 <- generate_formulas(p = 1, x_vars = x_vars, y_var = "poverty_probability")
+formulas_2 <- generate_formulas(p = 2, x_vars = x_vars, y_var = "poverty_probability")
+formulas_4 <- generate_formulas(p = 4, x_vars = x_vars, y_var = "poverty_probability")
+
+# Compute MSE for each set using map_dbl for clarity and efficiency
+mses_1 <- map_dbl(formulas_1, ~ lm_mse(as.formula(.x), poverty1_train, poverty1_valid))
+mses_2 <- map_dbl(formulas_2, ~ lm_mse(as.formula(.x), poverty1_train, poverty1_valid))
+mses_4 <- map_dbl(formulas_4, ~ lm_mse(as.formula(.x), poverty1_train, poverty1_valid))
+
+```
+
+## 5.5 Compare Model Performance
+```{r}
+# Compare the minimum MSE values across different model complexities
+min(mses_1, na.rm = TRUE)
+min(mses_2, na.rm = TRUE)
+min(mses, na.rm = TRUE)
+min(mses_4, na.rm = TRUE)
+# min(mses_4) is the lowest with [1] 0.06097781
+
+##Identify the best formula among 4-predictor models (min(mse_4))
+best_formula_4 <- formulas_4[which.min(mses_4)]
+best_formula_4
+```
+
+## 5.6 Train the Best Model
+```{r}
+# Estimate the best model and calculate mse
+lm_best <- lm(poverty_probability ~ country + is_urban + literacy + num_financial_activities_last_year, 
+              data = poverty1_val_and_test)
+
+# Define MSE function
+mse <- function(y_true, y_pred) mean((y_true - y_pred)^2)
+
+# Compute and display test set MSE
+test_mse <- mse(poverty1_test$poverty_probability, predict(lm_best, newdata = poverty1_test))
+cat("Test MSE for the best model:", test_mse, "\n")
+# Test MSE for the best model: 0.06036788
+```
+
+## 5.7 Cross-Validation for Model Stability
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Define 10-fold cross-validation using caret
+train_control <- trainControl(method = "cv", number = 10)
+
+# Train the linear regression model using 10-fold CV on combined validation & test set data
+cv_model <- train(
+  poverty_probability ~ country + is_urban + literacy + num_financial_activities_last_year,
+  data = poverty1_val_and_test,
+  method = "lm",
+  trControl = train_control
+)
+cv_model
+```
+
+## 5.8 Multicollinearity Check Using VIF
+```{r}
+# Calculate VIF for each predictor in the best linear model (lm_best)
+vif_values <- vif(lm_best)
+vif_values
+
+```
+
+## 5.9 Residual Diagnostics
+```{r fig.height=8, fig.width=10}
+# Set up a 2x2 plotting layout for diagnostic plots
+par(mfrow = c(2, 2))
+plot(lm_best)  # This will generate the 4 standard diagnostic plots
+par(mfrow = c(1, 1))  # Reset to default layout
+
+# Perform the Breusch-Pagan test for heteroscedasticity
+bp_test <- bptest(lm_best)
+bp_test
+# Breusch-Pagan test result rejects null hypothesis of homoscedasiticty; therefore the variance of the residuals is not constant across the range of fitted values
+```
+
+## 5.10 Robust Standard Errors
+```{r}
+# Compute a heteroscedasticity-consistent (HC) variance-covariance matrix
+robust_vcov <- vcovHC(lm_best, type = "HC1")
+
+# Apply coeftest() with the robust vcov matrix
+robust_results <- coeftest(lm_best, vcov = robust_vcov)
+robust_results
+```
+
+## 5.11 Bootstrapping for Coefficient Stability
+```{r}
+# Define a bootstrap function to compute the coefficients
+boot_fn <- function(data, indices) {
+  d <- data[indices, ]  # Subset the data using the bootstrap indices
+  fit <- lm(poverty_probability ~ country + is_urban + literacy + num_financial_activities_last_year, data = d)
+  return(coef(fit))
+}
+
+set.seed(123)
+
+# Perform bootstrapping with 1000 replications
+boot_results <- boot(data = poverty1_val_and_test, statistic = boot_fn, R = 1000)
+boot_results
+
+# Compute confidence intervals for a specific coefficient (e.g., literacy)
+boot_ci_literacy <- boot.ci(boot_results, type = "perc", index = 4)  # index 4 corresponds to literacy
+boot_ci_literacy
+```
+
+## 5.12 Influential Observations Check using Cook's Distance
+```{r}
+# Calculate Cook's distance for the best linear model
+cooksd <- cooks.distance(lm_best)
+
+# Plot Cook's distance values with a threshold line
+plot(cooksd, type = "h", main = "Cook's Distance", ylab = "Cook's distance")
+threshold <- 4 / (nrow(poverty1_val_and_test) - length(lm_best$coefficients) - 2)
+abline(h = threshold, col = "red", lty = 2)
+text(x = seq_along(cooksd), y = cooksd, labels = ifelse(cooksd > threshold, names(cooksd), ""), col = "blue", cex = 0.7)
+
+# Identify influential observations
+influential_obs <- which(cooksd > threshold)
+print(influential_obs)
+
+# Refit model without influential observations
+poverty1_val_and_test_reduced <- poverty1_val_and_test[-influential_obs, ]
+lm_reduced <- lm(poverty_probability ~ country + is_urban + literacy + num_financial_activities_last_year,
+                 data = poverty1_val_and_test_reduced)
+summary(lm_best)
+summary(lm_reduced)
+```
+
+## 5.13 Summary Statistics for Key Variables
+```{r}
+  # Summary Statistics for Numerical Variables
+selected_vars <- poverty %>% 
+  select(
+    age, 
+    female, 
+    employment_type_last_year, 
+    married, 
+    is_urban, 
+    country, 
+    literacy, 
+    num_financial_activities_last_year)
+selected_vars
+```
+
+```{r}
+## Generating summary statistics for numerical variables only
+summary_stats <- selected_vars %>% 
+  select(where(is.numeric)) %>% 
+  summary()
+
+summary_stats
+  
+```
+
+## 5.14 Correlation Analysis
+```{r}
+# Selecting new dataset with chosen variables and poverty probability
+  correlation_vars <- poverty %>%
+    select(poverty_probability, female, married, is_urban, country, literacy, 
+    num_financial_activities_last_year)
+  
+   ## Defining dummy variables
+  dummy_vars <- c("female", 
+                  "married", 
+                  "is_urban", 
+                  "literacy")
+```
+
+---
+
+# 6. Regularization using Glmnet
+
+## 6.1 Preparing Data for LASSO Regression
+```{r}
+# Generate the input matrix 
+x_train <- model.matrix(poverty_probability ~ ., data = poverty1_train)
+
+# Check dimensions
+head(x_train)
+nrow(x_train)  # Number of rows in x_train
+length(poverty1_train$poverty_probability)  # Number of elements in y
+
+# Ensure consistency in a row count
+poverty1_train <- poverty1_train[rownames(x_train), ]
+nrow(x_train)  # Should be 5948
+length(poverty1_train$poverty_probability)  # Should also be 5948
+```
+
+## 6.2 LASSO Regression
+```{r}
+# Train a LASSO regression model with a fixed lambda
+result <- glmnet(
+  x = x_train[, -1], # X matrix without intercept
+  y = poverty1_train$poverty_probability, # Poverty_probability as response
+  family = "gaussian", # Normally distributed errors
+  alpha  = 1, # LASSO penalty
+  lambda = 0.05 # Penalty value
+)
+
+# Display selected features (non-zero coefficients)
+nonzero <- rownames(coef(result))[which(coef(result) != 0)]
+nonzero
+
+# Prepare validation data
+x_valid <- model.matrix(poverty_probability ~ ., data = poverty1_valid)[, -1]
+
+# Make predictions with the LASSO model
+y_pred <- as.numeric(predict(result, newx = x_valid))
+```
+
+## 6.3 Tuning LASSO Regularization Parameter
+```{r}
+# Fit LASSO regression without a fixed lambda to explore all options
+result_nolambda <- glmnet(x = x_train[, -1], y = poverty1_train$poverty_probability, 
+                          family = "gaussian", alpha  = 1)
+
+plot(result_nolambda)
+```
+
+## 6.4 Cross-Validation for Optimal lambda
+```{r}
+# Combine training and validation data for cross-validation
+x_cv <- model.matrix(poverty_probability ~ ., bind_rows(poverty1_train, poverty1_valid))[, -1]
+
+nrow(x_cv)  # Number of rows in the predictor matrix
+length(c(poverty1_train$poverty_probability, poverty1_valid$poverty_probability))  # Length of the response variable
+
+nrow(poverty1_train)  # Check number of rows in training set
+nrow(poverty1_valid)  # Check number of rows in validation set
+sum(is.na(poverty1_train))  # Check for NA values in training set
+sum(is.na(poverty1_valid))  # Check for NA values in validation set
+poverty1_valid <- poverty1_valid[complete.cases(poverty1_valid), ]
+
+# Perform 15-fold cross-validation to find the best lambda
+result_cv <- cv.glmnet(
+  x = x_cv, 
+  y = c(poverty1_train$poverty_probability,          poverty1_valid$poverty_probability),
+  nfolds = 15
+)
+
+# Extract best lambda
+best_lambda <- result_cv$lambda.min
+best_lambda
+#Best Lambda: [1] 0.0002387792
+
+# Plot cross-validation results
+plot(result_cv)
+```
+
+
+```{r}
+# Using optimal lambda to refit the LASSO model
+lasso_best <- glmnet(
+  x = x_train[, -1],
+  y = poverty1_train$poverty_probability,
+  family = "gaussian",
+  alpha = 1,
+  lambda = best_lambda
+)
+lasso_best
+
+y_pred_best <- as.numeric(predict(lasso_best, newx = x_valid))
+mse_lasso <- mean((poverty1_valid$poverty_probability - y_pred_best)^2)
+mse_lasso
+#[1] 0.05737259
+```
+
+```{r}
+# Extract non-zero coefficients from your final LASSO model
+lasso_coefs <- coef(lasso_best)
+selected_predictors <- rownames(lasso_coefs)[which(lasso_coefs != 0)]
+selected_predictors[1:25]
+```
+
+# 7. Alternative Methods
+
+## 7.1 Random Forest
+```{r}
+# Train a Random Forest model using the training data
+rf_model <- randomForest(
+  poverty_probability ~ country + is_urban + literacy + num_financial_activities_last_year,
+  data = poverty1_train,
+  ntree = 500, # number of trees to grow
+  mtry = 2, # number of variables to possibly split at in each node
+  importance = TRUE # to compute variable importance
+)
+
+# Display model summary
+rf_model
+
+# Predict on the validation set
+rf_predictions <- predict(rf_model, newdata = poverty1_valid)
+
+# Calculate MSE and RMSE for Random Forest
+rf_mse <- mean((poverty1_valid$poverty_probability - rf_predictions)^2)
+rf_rmse <- sqrt(rf_mse)
+cat("Random Forest RMSE:", rf_rmse, "\n")
+# Random Forest RMSE: 0.2407067
+
+# View variable importance
+importance(rf_model)
+varImpPlot(rf_model)
+
+```
+
+## 7.2 XGBoost
+```{r}
+# Prepare matrices for predictors and response
+# Exclude the intercept column if present
+train_matrix <- model.matrix(poverty_probability ~ . - 1, data = poverty1_train)
+train_response <- poverty1_train$poverty_probability
+
+valid_matrix <- model.matrix(poverty_probability ~ . - 1, data = poverty1_valid)
+valid_response <- poverty1_valid$poverty_probability
+
+# Set parameters for XGBoost
+params <- list(
+  objective = "reg:squarederror", # for regression
+  eta = 0.1, # learning rate
+  max_depth = 6, # maximum depth of a tree
+  subsample = 0.8, # fraction of observations to be randomly sampled for each tree
+  colsample_bytree = 0.8 # fraction of columns to be randomly sampled for each tree
+)
+
+# Train the XGBoost model using the training matrix
+xgb_model <- xgboost(
+  data = train_matrix,
+  label = train_response,
+  params = params,
+  nrounds = 100, # number of boosting iterations
+  verbose = 0         
+)
+
+# Predict on the validation set
+xgb_predictions <- predict(xgb_model, newdata = valid_matrix)
+
+# Calculate MSE and RMSE for XGBoost on validation set
+xgb_mse <- mean((valid_response - xgb_predictions)^2)
+xgb_rmse <- sqrt(xgb_mse)
+cat("XGBoost MSE:", xgb_mse, "\n")
+cat("XGBoost RMSE:", xgb_rmse, "\n")
+## XGBoosr MSE: 0.04948
+## XGBoost RMSE: 0.2229667
+
+# Feature importance
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix), model = xgb_model)
+importance_matrix
+
+# Plot feature importance
+xgb.plot.importance(importance_matrix = importance_matrix)
+
+```
+
+## 7.2.1 Evaluate Final XGBoost Model on Test Set
+```{r}
+# Subset the test set to only include complete cases for all predictors used in the model
+test_complete <- poverty1_test[complete.cases(poverty1_test), ]
+
+# Now create the model matrix and response vector from this subset
+test_matrix <- model.matrix(poverty_probability ~ . - 1, data = test_complete)
+test_response <- test_complete$poverty_probability
+
+# Check dimensions for consistency
+cat("Rows in test_matrix:", nrow(test_matrix), "\n")
+cat("Length of test_response:", length(test_response), "\n")
+```
+
+```{r}
+# Generate predictions on the complete test set
+xgb_test_predictions <- predict(xgb_model, newdata = test_matrix)
+
+# Calculate performance metrics on test set
+xgb_test_mse <- mean((test_response - xgb_test_predictions)^2)
+xgb_test_rmse <- sqrt(xgb_test_mse)
+xgb_test_mae <- mean(abs(test_response - xgb_test_predictions))
+
+# Compute R-squared:
+SST <- sum((test_response - mean(test_response))^2)
+SSE <- sum((test_response - xgb_test_predictions)^2)
+xgb_test_r2 <- 1 - SSE/SST
+
+# Print the results
+cat("XGBoost Test MSE:", xgb_test_mse, "\n")
+cat("XGBoost Test RMSE:", xgb_test_rmse, "\n")
+cat("XGBoost Test MAE:", xgb_test_mae, "\n")
+cat("XGBoost Test R-squared:", xgb_test_r2, "\n")
+## -> increased r^2 confirms our selection for XGBoost
+#XGBoost Test MSE: 0.0488577
+#XGBoost Test RMSE: 0.2230056 
+#XGBoost Test MAE: 0.1780829 
+#XGBoost Test R-squared: 0.4156589 
+
+```
+
+## 7.2.2 Fine-Tuning XGBoost Hyperparameters
+```{r}
+# Define a grid of hyperparameters
+xgb_grid <- expand.grid(
+  nrounds = c(50, 100, 150),
+  max_depth = c(4, 6, 8),
+  eta = c(0.05, 0.1, 0.2),
+  gamma = 0,                # No gamma by default
+  colsample_bytree = c(0.6, 0.8, 1.0),
+  min_child_weight = c(1, 3, 5),
+  subsample = c(0.6, 0.8, 1.0)
+)
+
+# Set up training control with cross-validation
+xgb_trcontrol <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = TRUE,
+  allowParallel = TRUE
+)
+
+# Train the model using caret's train() function
+set.seed(123)
+xgb_tuned <- train(
+  x = train_matrix,
+  y = train_response,
+  trControl = xgb_trcontrol,
+  tuneGrid = xgb_grid,
+  method = "xgbTree",
+  verbose = FALSE
+)
+
+# View the best tuning parameters
+xgb_tuned$bestTune
+```
+
+## 7.2.3 Use the Best Hyperparameters to Train a Final Model
+```{r}
+## now that we have identified the best hyperparameters, we will use that to train the final model
+
+# Extract the best hyperparameters from the tuning result
+best_params <- xgb_tuned$bestTune
+
+# Build a final XGBoost model with the best hyperparameters
+final_xgb_model <- xgboost(
+  data = train_matrix,
+  label = train_response,
+  nrounds = best_params$nrounds,
+  max_depth = best_params$max_depth,
+  eta = best_params$eta,
+  gamma = best_params$gamma,
+  colsample_bytree = best_params$colsample_bytree,
+  min_child_weight = best_params$min_child_weight,
+  subsample = best_params$subsample,
+  objective = "reg:squarederror",
+  verbose = 0
+)
+```
+
+## 7.2.4 Evaluate on the Validation Set
+```{r}
+# Generate predictions
+final_preds <- predict(final_xgb_model, newdata = valid_matrix)
+
+# Calculate performance metrics
+final_mse <- mean((valid_response - final_preds)^2)
+final_rmse <- sqrt(final_mse)
+final_mae <- mean(abs(valid_response - final_preds))
+
+cat("Final XGBoost MSE:", final_mse, "\n")
+cat("Final XGBoost RMSE:", final_rmse, "\n")
+cat("Final XGBoost MAE:", final_mae, "\n")
+#Final XGBoost MSE: 0.04899
+#Final XGBoost RMSE: 0.2213426 
+#Final XGBoost MAE: 0.1791677
+```
+
+## 7.2.5 Evaluate Final Model on Test Set
+```{r}
+xgb_test_predictions <- predict(final_xgb_model, newdata = test_matrix)
+
+# Calculate performance metrics for the final model on the test set
+xgb_test_mse <- mean((test_response - xgb_test_predictions)^2)
+xgb_test_rmse <- sqrt(xgb_test_mse)
+xgb_test_mae <- mean(abs(test_response - xgb_test_predictions))
+SST <- sum((test_response - mean(test_response))^2)
+SSE <- sum((test_response - xgb_test_predictions)^2)
+xgb_test_r2 <- 1 - SSE/SST
+
+cat("Final XGBoost Test MSE:", xgb_test_mse, "\n")
+cat("Final XGBoost Test RMSE:", xgb_test_rmse, "\n")
+cat("Final XGBoost Test MAE:", xgb_test_mae, "\n")
+cat("Final XGBoost Test R-squared:", xgb_test_r2, "\n")
+#Final XGBoost Test MSE: 0.0488577
+#Final XGBoost Test RMSE: 0.2210377 
+#Final XGBoost Test MAE: 0.1772661 
+#Final XGBoost Test R-squared: 0.4259264 
+```
+
+## 7.2.6 Variable Importance: Sorted by Gain
+```{r}
+importance_matrix <- xgb.importance(
+  feature_names = colnames(train_matrix),
+  model = final_xgb_model
+)
+
+# 1) Explicitly sort by Gain in descending order
+importance_matrix <- importance_matrix[order(importance_matrix$Gain, decreasing = TRUE), ]
+
+# 2) Slice the top 25 features
+top25 <- importance_matrix[1:25, ]
+
+# 3) Plot them
+xgb.plot.importance(top25)   # Plots only the top 25, sorted by Gain
+
+# 4) Check the same data frame
+head(top25, 25)  # Matches the 25 features in the top25 plot
+```
+
+## 7.2.7 I FORGOT WHAT THIS IS< DONT FORGET TO ADD TITLE
+```{r}
+predict_function <- function(model, newdata) {
+  # Convert newdata to a model matrix using the same formula as training
+  new_matrix <- model.matrix(poverty_probability ~ . - 1, data = newdata)
+  
+  # Get the column names from the training matrix
+  train_cols <- colnames(train_matrix)
+  
+  # Identify missing columns in new_matrix
+  missing_cols <- setdiff(train_cols, colnames(new_matrix))
+  
+  # If there are missing columns, add them with 0 values
+  if(length(missing_cols) > 0){
+    missing_mat <- matrix(0, nrow = nrow(new_matrix), ncol = length(missing_cols))
+    colnames(missing_mat) <- missing_cols
+    new_matrix <- cbind(new_matrix, missing_mat)
+  }
+  
+  # Reorder the columns to match the training matrix exactly
+  new_matrix <- new_matrix[, train_cols, drop = FALSE]
+  
+  # Predict using the final XGBoost model
+  predict(model, newdata = new_matrix)
+}
+
+```
+
+## 7.2.8 Partical Dependence: Example Education level
+```{r}
+# Build iml Predictor object
+predictor <- Predictor$new(
+  model = final_xgb_model,
+  data = as.data.frame(poverty1_train),  # Use the original training data
+  y = poverty1_train$poverty_probability,
+  predict.fun = predict_function
+)
+
+# Example PDP for "education_level"
+fe_edu <- FeatureEffect$new(predictor, feature = "education_level", method = "pdp")
+pdp_edu_plot <- fe_edu$plot() +
+  ggtitle("Partial Dependence Plot for Education Level") +
+  theme_minimal()
+pdp_edu_plot
+```
+
+
+```{r}
+# Generate PDPs for multiple predictors and arrange in a grid using patchwork
+
+# PDP for "education_level"
+p_edu <- FeatureEffect$new(predictor, feature = "education_level", method = "pdp")$plot() +
+  labs(title = "education_level") + theme_minimal()
+
+# PDP for "is_urban"
+p_isurban <- FeatureEffect$new(predictor, feature = "is_urban", method = "pdp")$plot() +
+  labs(title = "is_urban") + theme_minimal()
+
+# PDP for "phone_technology"
+p_phone <- FeatureEffect$new(predictor, feature = "phone_technology", method = "pdp")$plot() +
+  labs(title = "phone_technology") + theme_minimal()
+
+# PDP for "num_financial_activities_last_year"
+p_financial <- FeatureEffect$new(predictor, feature = "num_financial_activities_last_year", method = "pdp")$plot() +
+  labs(title = "num_financial_activities_last_year") + theme_minimal()
+
+# PDP for "age"
+p_age <- FeatureEffect$new(predictor, feature = "age", method = "pdp")$plot() +
+  labs(title = "age") + theme_minimal()
+
+# Arrange PDPs in a 2x3 grid (with one empty if needed)
+final_pdp_layout <- (p_edu + p_isurban) /
+                    (p_phone + p_financial + p_age)
+final_pdp_layout <- final_pdp_layout + plot_annotation(title = "Partial Dependence Plots (2×3)")
+final_pdp_layout
+```
+
+```{r}
+saveRDS(final_xgb_model, "final_xgb_model.rds")
+saveRDS(colnames(train_matrix), "train_cols.rds")
+saveRDS(poverty1_train, file = "poverty1_train.rds")
+```
+⁠
+---
+
+# 8. Descriptive Statistics
+
+## 8.1 Summary Statistics for Key Variables
+```{r}
+ # Select the Variables
+selected_vars <- poverty %>% 
+  select(
+    age, 
+    female, 
+    employment_type_last_year, 
+    married, 
+    is_urban, 
+    country, 
+    literacy, 
+    num_financial_activities_last_year,
+    country,
+    relationship_to_hh_head,
+    education_level,
+    can_text,
+    phone_technology)
+
+# Generate summary statistics for selected numerical variables 
+  summary_stats <- selected_vars %>% 
+    select(where(is.numeric)) %>% 
+    summary()
+  
+# Print the summary statistics
+  print(summary_stats)
+  
+```
+
+## 8.2 Calculating the mean for selected dummy variables 
+```{r}
+
+# 1. Preparing variables for further visualisation
+# a) Create new dataset with chosen variables and poverty probability
+  correlation_vars <- poverty %>%
+    select(poverty_probability, female, married, is_urban, country, literacy, 
+    num_financial_activities_last_year, can_text, phone_technology)
+
+ # b) Define dummy variables
+  dummy_vars <- c("female", 
+                  "married", 
+                  "is_urban", 
+                  "literacy",
+                  "can_text")
+  
+  
+# 2.  Calculating means for selected dummy variables
+  dummy_means <- selected_vars %>%
+    select(female, 
+           married, 
+           is_urban, 
+           literacy,
+           can_text) %>%
+    summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>%
+    pivot_longer(everything(), names_to = "Variable", values_to = "Mean") %>%
+    filter(!is.na(Mean)) 
+  
+  # a)  Creating the bar plot 
+  ggplot(dummy_means, aes(x = reorder(Variable, Mean), y = Mean, fill = Variable)) +
+    geom_bar(stat = "identity", width = 0.7, color = "black") +
+    geom_text(aes(label = paste0(round(Mean * 100, 1), "%")), vjust = -0.5, size = 4, na.rm = TRUE) +  
+    scale_fill_brewer(palette = "Set3") +
+    labs(title = "Mean Values of Dummy Variables",
+         x = "Variable",
+         y = "Mean (Proportion)") +
+    theme_minimal(base_size = 14) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none",
+          plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+
+## 8.3 Visualizations: Poverty probability by each dummy variable 
+```{r}
+# Create violin plots for each dummy variable with proper dataset
+  for (var in dummy_vars) {
+    violin_plot <- ggplot(correlation_vars, aes(x = factor(.data[[var]], labels = c("No", "Yes")), 
+                                                y = poverty_probability, 
+                                                fill = factor(.data[[var]]))) +
+      geom_violin(trim = FALSE, alpha = 0.6) +
+      geom_boxplot(width = 0.1, fill = "white", color = "black", outlier.shape = NA) +
+      labs(title = paste("Poverty Probability by", var),
+           x = var,
+           y = "Poverty Probability") +
+      scale_fill_brewer(palette = "Set2") +
+      theme_minimal(base_size = 14) +
+      theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+            legend.position = "none",
+            plot.title = element_text(hjust = 0.5, face = "bold"))
+    
+print(violin_plot)
+  }
+```
+
+## 8.4  Visialisation: Poverty probability by country 
+```{r}
+  country_boxplot <- ggplot(correlation_vars, aes(x = reorder(country, poverty_probability, median),
+                                                  y = poverty_probability,
+                                                  fill = factor(country))) +
+    geom_boxplot(alpha = 0.7, outlier.color = "red", outlier.size = 1.5) +
+    labs(title = "Poverty Probability by Country",
+         x = "Country",
+         y = "Poverty Probability",
+         fill = "Country") +
+    scale_fill_brewer(palette = "Set3") +
+    theme_minimal(base_size = 14) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "none")  
+
+  print(country_boxplot)
+```
+
+## 8.5 Visialisation: Poverty probability by Age groups
+```{r}
+# 1. Create a histogram with a density curve for age distribution
+  ggplot(selected_vars, aes(x = age)) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = "#69b3a2", color = "black", alpha = 0.7) +  
+    geom_density(color = "#1f78b4", size = 1.2, linetype = "dashed") + 
+    labs(title = "Age Distribution",
+         x = "Age",
+         y = "Density") +
+    theme_minimal(base_size = 14) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+# 2. Visualize poverty Probability Across Age Groups
+poverty_by_age_group <- poverty %>%
+  group_by(age_group) %>%
+  summarise(avg_poverty_probability = mean(poverty_probability, na.rm = TRUE))
+
+    ## Removing NA values in age_group
+poverty_filtered <- poverty %>% filter(!is.na(age_group))
+
+    ## Violin plot
+ggplot(poverty_filtered, aes(x = age_group, y = poverty_probability, fill = age_group)) +
+  geom_violin(trim = FALSE, alpha = 0.7, color = "black") +  # Violin with black outline
+  geom_boxplot(width = 0.1, fill = "white", outlier.color = "red") +  
+  scale_fill_brewer(palette = "Set3") +  # Nicer color palette
+  labs(title = "Distribution of Poverty Probability by Age Group",
+       x = "Age Group", y = "Poverty Probability") +
+  theme_minimal(base_size = 14) +  # Cleaner theme with larger text
+  theme(legend.position = "none",  # Remove legend (not needed for x-axis categories)
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        axis.title = element_text(face = "bold"), axis.text = element_text(color = "black", size = 12))
+
+```
+
+## 8.6 Visualization: Frequency tables for Categorical Variables
+```{r}
+# 1. Frequency Tables for Categorical Variables
+employment_freq <- poverty %>% count(employment_type_last_year)
+education_freq <- poverty %>% count(education_level)
+phone_freq <- poverty %>% count(phone_technology) %>% mutate(phone_technology = as.factor(phone_technology))
+head_freq <- poverty %>%
+  count(relationship_to_hh_head) %>%
+  mutate(percentage = round((n / sum(n)) * 100, 2))
+
+print(employment_freq) 
+print(education_freq)
+print(head_freq)
+print(phone_freq)
+
+# 2. Employment Type Frequency
+ggplot(employment_freq, aes(x = reorder(employment_type_last_year, -n), y = n, fill = employment_type_last_year)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Employment Type Frequency",
+       x = "Employment Type", y = "Count") +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+
+# 3. Education Level 
+
+# a) Convert variables to factors
+education_freq <- education_freq %>%
+  mutate(education_level = as.factor(education_level))
+
+# b) Remove NA values and calculate percentages
+education_freq_clean <- education_freq %>%
+  filter(!is.na(education_level)) %>%  # Remove NAs
+  mutate(percentage = round((n / sum(n)) * 100, 2),  
+         education_level = as.factor(education_level))
+
+# c) Visualization: Education Level Frequency
+ggplot(education_freq_clean, aes(x = reorder(education_level, -n), y = n, fill = education_level)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(percentage, "%")), vjust = -0.5, size = 4) +  
+  labs(title = "Education Level Frequency",
+       x = "Education Level", y = "Count") +
+  scale_fill_brewer(palette = "Pastel1") +  
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")  
+
+# 4. Relationship to Household Head Frequency
+ggplot(head_freq, aes(x = reorder(relationship_to_hh_head, -n), y = n, fill = relationship_to_hh_head)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(percentage, "%")), vjust = -0.5, size = 4) +  # Add percentage labels
+  labs(title = "Relationship to Household Head",
+       x = "Relationship", y = "Count") +
+  scale_fill_brewer(palette = "Set3") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+
+# 5. Phone Technology Frequency
+ggplot(phone_freq, aes(x = reorder(phone_technology, -n), y = n, fill = phone_technology)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Phone Technology Frequency",
+       x = "Phone Technology", y = "Count") +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+```
+
+
+## 8.7 Visualization: Poverty Probability by Categorical Variables
+```{r}
+# 1. Poverty Probability by Employment Status
+ggplot(poverty, aes(x = employment_type_last_year, y = poverty_probability, fill = employment_type_last_year)) +
+  geom_boxplot() +
+  labs(title = "Poverty Probability by Employment Status",
+       x = "Employment Status", y = "Poverty Probability") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# 2. Poverty Probability by Education Level
+# a) Clean the NA values
+poverty_clean <- poverty %>%
+  filter(!is.na(education_level))
+
+# b) Visualisation
+ggplot(poverty_clean, aes(x = factor(education_level), y = poverty_probability, fill = factor(education_level))) +
+  geom_violin(trim = FALSE, alpha = 0.6) +  # Violin plot to show distribution
+  geom_boxplot(width = 0.1, fill = "white", color = "black", outlier.shape = NA) +  # Boxplot overlay
+  labs(title = "Poverty Probability by Education Level",
+       x = "Education Level",
+       y = "Poverty Probability") +
+  scale_fill_brewer(palette = "Set2") +  # Nice color palette
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# 3. Poverty Probability by relationship to household head
+# a) Clean the NA values
+poverty_clean <- poverty %>%
+  filter(!is.na(relationship_to_hh_head))
+
+# b) Visualisation
+ggplot(poverty_clean, aes(x = factor(relationship_to_hh_head), 
+                          y = poverty_probability, 
+                          fill = factor(relationship_to_hh_head))) +
+  geom_violin(trim = FALSE, alpha = 0.6) +  # Violin plot for distribution
+  geom_boxplot(width = 0.1, fill = "white", color = "black", outlier.shape = NA) +  # Overlay boxplot
+  labs(title = "Poverty Probability by Relationship to Household Head",
+       x = "Relationship to Household Head",
+       y = "Poverty Probability") +
+  scale_fill_brewer(palette = "Set3") +  # Color scheme for differentiation
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate labels for clarity
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# 4. Poverty Probability by Phone Technology
+# a) Clean the NA values
+poverty_clean <- poverty %>%
+  filter(!is.na(phone_technology))
+
+# b) Visualisation
+ggplot(poverty_clean, aes(x = factor(phone_technology), y = poverty_probability, fill = factor(phone_technology))) +
+  geom_violin(trim = FALSE, alpha = 0.6) +  # Violin plot to show distribution
+  geom_boxplot(width = 0.1, fill = "white", color = "black", outlier.shape = NA) +  # Boxplot overlay
+  labs(title = "Poverty Probability by Level of Phone Technology Usage",
+       x = "Phone Technology",
+       y = "Poverty Probability") +
+  scale_fill_brewer(palette = "Set2") +  # Nice color palette
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+
+## 8.8 Correlation Matrix of Top Predictors
+```{r}
+# Select most predictive variables
+top_vars <- poverty %>% 
+  select(is_urban, literacy, num_financial_activities_last_year, can_text, female, age, married, phone_technology) %>%
+  mutate(
+    is_urban = as.numeric(is_urban), 
+    literacy = as.numeric(literacy),
+    can_text = as.numeric(can_text),
+    female = as.numeric(female),
+    married = as.numeric(married),
+    phone_technology = as.numeric(phone_technology)
+  )
+
+# Compute the correlation matrix
+cor_matrix <- round(cor(top_vars, use = "complete.obs"), 2)
+
+# Convert to DataFrame for DT
+cor_matrix_df <- as.data.frame(cor_matrix)
+
+# Create a Matrix
+datatable(cor_matrix_df, options = list(
+  dom = 't',  # Removes unnecessary search bar
+  paging = FALSE,  # Removes pagination
+  ordering = FALSE  # Disables column sorting
+)) %>%
+  formatStyle(columns = colnames(cor_matrix_df), color = "black")  # Ensures text is black
+
+```
+
+## 8.9 Visualization: Number of Financial Activities variables
+```{r}
+# Clean the NA values
+poverty_clean <- poverty %>%
+  filter(!is.na(num_financial_activities_last_year))
+
+# Density plot for number of financial transactions
+ggplot(poverty_clean, aes(x = num_financial_activities_last_year)) +
+  geom_histogram(binwidth = 0.5, fill = "blue", color = "black", alpha = 0.7) +  
+  labs(title = "Distribution of Financial Transactions Last Year",
+       x = "Number of Financial Activities",
+       y = "Count") +
+  theme_minimal(base_size = 14)
+
+# Violin plot for poverty probability by number of financial transactions
+ggplot(poverty_clean, aes(x = factor(num_financial_activities_last_year), 
+                          y = poverty_probability, 
+                          fill = factor(num_financial_activities_last_year))) +
+  geom_violin(trim = FALSE, alpha = 0.6) +  # Violin plot for distribution
+  geom_boxplot(width = 0.1, fill = "white", color = "black", outlier.shape = NA) +  
+  labs(title = "Poverty Probability by Number of Financial Activities",
+       x = "Number of Financial Activities",
+       y = "Poverty Probability") +
+  scale_fill_brewer(palette = "Set3") +  
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+## 8.10 Visualization: Employment Status Distribution Across Age Groups
+```{r}
+# Remove NA values 
+  poverty_clean <- poverty %>%
+  filter(!is.na(employment_type_last_year), !is.na(age_group))
+
+# Visualization
+ggplot(poverty_clean, aes(x = age_group, fill = employment_type_last_year)) +
+  geom_bar(position = "fill") +
+  labs(title = "Employment Status Distribution Across Age Groups",
+       x = "Age Group", y = "Proportion") +
+  scale_fill_brewer(palette = "Set2") +  # Nice color palette
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+

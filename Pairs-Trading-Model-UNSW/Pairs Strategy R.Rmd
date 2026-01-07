@@ -1,0 +1,644 @@
+---
+title: "Pairs Trading Strategy"
+author: "Aleksandra Tatko"
+date: "`r Sys.Date()`"
+params:
+  answers: false
+mainfont: Arial
+fontsize: 12pt
+urlcolor: blue
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: paper
+---
+# **Step 1: Install Required Libraries**
+```{r setup, include=FALSE}
+# Set the CRAN mirror
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+
+# Load or install required packages
+packages <- c("quantmod", "tseries", "PerformanceAnalytics", "TTR", "urca", "xts")
+install_if_missing <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+lapply(packages, install_if_missing)
+
+# Load the packages
+lapply(packages, library, character.only = TRUE)
+```
+
+# **Step 2: Data Collection**
+We’ll choose Coca-Cola (KO) and PepsiCo (PEP) as our stock pair example and fetch their historical prices.
+```{r, comment = NA}
+library(quantmod)
+
+# Fetch historical stock price data
+symbols <- c("KO", "PEP")
+getSymbols(symbols, from = "2010-01-01", to = Sys.Date())
+
+# Extract adjusted closing prices
+ko_prices <- Cl(KO)
+pep_prices <- Cl(PEP)
+
+```
+
+* **Data**: We gather the adjusted closing prices of these stocks.
+* **Why These Stocks**: Coca-Cola and PepsiCo are in the same industry (beverage), making them likely candidates for pairs trading as they often move together.
+* **Purpose**: This step provides the historical price data needed to analyze and implement the trading strategy.
+
+# **Step 3: Correlation and Co-Integration Analysis**
+We perform two key tests:
+
+**1. Correlation Test:**
+
+* We calculate the correlation between the daily returns of the two stocks to verify if they have historically moved together.
+
+* A high correlation suggests that the two stocks tend to move in the same direction.
+
+**2. Co-Integration Test:**
+
+* Correlation alone is not sufficient for pairs trading; the stocks must also be co-integrated. Co-integration implies that despite the short-term fluctuations, there exists a long-term equilibrium relationship between the two stocks.
+
+The Johansen test was used to determine if KO and PEP are co-integrated. The test identifies whether a stationary linear combination exists between the two non-stationary price series (KO and PEP), indicating that they share a common stochastic trend.
+
+```{r, comment = NA}
+library(urca)
+# Calculate the daily returns for KO and PEP
+ko_returns <- dailyReturn(Cl(KO))
+pep_returns <- dailyReturn(Cl(PEP)) 
+
+# Calculate the Pearson correlation between the daily returns
+pearson_correlation <- cor(ko_returns, pep_returns, method = "pearson")
+print(pearson_correlation)
+
+
+# Convert the prices to a data frame for the co-integration test
+price_data <- cbind(Cl(KO), Cl(PEP))
+colnames(price_data) <- c("KO", "PEP")
+# Perform the Johansen co-integration test
+johansen_test <- ca.jo(price_data, type = "trace", ecdet = "none", K = 2)
+
+# Display the summary of the Johansen test
+summary(johansen_test)
+
+```
+
+**Purpose**: This analysis confirms whether the selected pair is suitable for pairs trading by ensuring they have both a short-term correlation and a long-term relationship (co-integration).
+
+**Interpretation:**
+
+1. Eigenvalues:
+The first eigenvalue is approximately
+`0.003`.
+The second eigenvalue is `0.0002`.
+Test Statistics and Critical Values:
+
+* For 𝑟 ≤ 1:  The test statistic is `0.80`, which is below all the critical values (10%, 5%, and 1% levels).
+
+* For 𝑟 = 0: The test statistic is `12.96`, which is below the 10% critical value (15.66), the 5% critical value (17.95), and the 1% critical value (23.52)​.
+
+The combination of a `high correlation (0.7)` and a `positive co-integration result (12.96)` confirms that KO and PEP are suitable for pairs trading, as they not only move together but also exhibit mean-reverting behavior, aligning with the strategy’s requirements.
+
+# **Step 4a: Spread Calculation and Stationarity Test**
+Calculate the price spread and perform the ADF test to verify its stationarity.
+
+**Purpose**: The spread’s behavior helps us identify whether deviations between the stock prices are temporary and likely to revert, which is the foundation of the pairs trading strategy.
+
+
+```{r, comment = NA}
+# The spread is calculated as the difference between the prices of KO and PEP:
+spread <- Cl(KO) - Cl(PEP)
+
+# We then test the spread's stationarity using the Augmented Dickey-Fuller (ADF) test to confirm that the spread tends to revert to a mean value over time (a key assumption for pairs trading).
+adf_test <- adf.test(spread)
+print(adf_test)
+
+# Plot the spread
+plot(spread, main = "Price Spread between KO and PEP", col = "blue")
+
+```
+
+
+**Interpretation ADF Test Result: **
+
+* The ADF test statistic value is `-3.6818`, with a p-value of `0.02488`​.
+
+* A p-value below 0.05 indicates that we can reject the null hypothesis, which states that the spread has a unit root (non-stationary).
+Therefore, the spread is stationary.
+
+**Interpretation of the plot:**
+
+* The spread shows both short-term mean reversion (which is a positive indicator for pairs trading) and a long-term trend (which could require adjustments or consideration of external factors affecting the stocks).
+
+* For pairs trading to be effective, it’s important to capitalize on the short-term oscillations while being mindful of the long-term trend.
+
+# **Step 4b: Short term focus**
+If we want to focus on a short term mean reverion opportunities we use the rolling window, that can be adjusted based of the specific analysis, industry, requirements, etc. ( in our example 60 days), to capture shorter-term fluctuations in the spread. 
+
+```{r, comment = NA}
+# Load necessary libraries
+library(quantmod)
+library(TTR)
+
+# Define the window size for rolling calculations (e.g., 60 days)
+window_size <- 60
+
+# Calculate the rolling mean and rolling standard deviation of the spread
+rolling_mean <- runMean(spread, n = window_size)
+rolling_sd <- runSD(spread, n = window_size)
+
+# Calculate the Z-score based on rolling statistics
+z_score <- (spread - rolling_mean) / rolling_sd
+
+# Plot the spread and the rolling mean
+plot(spread, main = "Price Spread between KO and PEP", col = "blue")
+lines(rolling_mean, col = "red", lty = 2)
+abline(h = 0, col = "black", lty = 3)
+
+```
+
+**Interpretation**
+
+* The red dashed line represents the rolling mean of the spread calculated over a set window size (60 days). It smooths out short-term fluctuations to highlight the average behavior of the spread within the chosen period.
+The rolling mean helps visualize the short-term trends of the spread, showing when the spread is generally above or below its short-term average.
+
+* In many segments of the plot, the blue line (spread) oscillates around the red dashed line (rolling mean), indicating that the spread reverts to the mean after deviating. This behavior is essential for mean-reversion strategies like pairs trading.
+
+# **Step 5: Calculate Z-Score for Trading Signals**
+We calculate the Z-score of the spread, which measures how far the spread deviates from its mean in terms of standard deviations. 
+
+**Purpose**: This Z-score helps us understand if the spread is significantly different from its average, which can be used as a signal to enter or exit trades.
+
+```{r, comment = NA}
+library(TTR)
+
+# Calculate rolling mean and standard deviation of the spread
+window_size <- 60
+rolling_mean <- runMean(spread, n = window_size)
+rolling_sd <- runSD(spread, n = window_size)
+
+# Calculate Z-score
+z_score <- (spread - rolling_mean) / rolling_sd
+
+# Plot the Z-score
+plot(z_score, type = "l", main = "Z-Score of the Spread", col = "red")
+abline(h = c(-2, 2), col = "blue", lty = 2)
+
+```
+
+**Threshold Choice:**
+The ±2 Z-score thresholds indicate points where the spread is significantly deviated from its mean (beyond 2 standard deviations). This is a common practice in pairs trading to define when a spread is sufficiently diverged to justify entering a trade: 
+
+* **Z-score < -2:**  The spread is lower than expected, suggesting that KO may be undervalued relative to PEP. The strategy would initiate a long position on KO and a short position on PEP, expecting the spread to narrow (revert to the mean).
+
+* **Z-score > 2:**  The spread is higher than expected, indicating that KO may be overvalued relative to PEP. The strategy would take a short position on KO and a long position on PEP, anticipating the spread to decrease.
+
+# **Step 6: Trading Logic Implementation**
+
+**Purpose:** This step sets up the trading strategy, defining when to enter and exit positions based on the behavior of the spread relative to its historical average.
+
+We use the Z-score to create trading rules:
+
+## **Entry Signals**
+
+**1. When the Z-score is below -2:**
+
+* This indicates that the spread is significantly below its average level (by more than two standard deviations). In this case:
+
+  + The strategy **buys** Coca-Cola (KO) and **sells** PepsiCo (PEP).
+  
+  + This position assumes that the spread is undervalued and will revert to the mean, making KO relatively cheaper than PEP. By going long KO and short PEP, the expectation is that KO’s price will rise or PEP’s price will fall (or both), closing the gap.
+  
+**2.When the Z-score is above 2:**
+
+* This indicates that the spread is significantly above its average level (by more than two standard deviations). In this case:
+  + The strategy **sells** Coca-Cola (KO) and **buys** PepsiCo (PEP).
+  
+  + This position assumes that the spread is overvalued and will revert to the mean, making KO relatively expensive compared to PEP. By shorting KO and going long PEP, the expectation is that KO’s price will fall or PEP’s price will rise (or both), reducing the spread.
+
+## **Exit Signal**
+
+The strategy closes its position when the Z-score returns to around 0. This implies that the spread has reverted to its mean, and the trading opportunity has completed. By exiting at this point:
+
+* The strategy locks in profits based on the movement of KO and PEP prices back to their expected relationship.
+
+* Exiting at a Z-score of 0 ensures that the trade captures the mean reversion, which is the central concept behind pairs trading.
+
+## **Backtesting**
+
+We apply the strategy rules to historical prices and track the performance as if we were trading in real-time.
+
+**1. Data Splitting:**
+
+The dataset is split into training (70%) and testing (30%) portions. The training set is used for developing and refining the strategy, while the test set evaluates how the strategy performs on unseen data. This split prevents overfitting, ensuring the strategy generalizes well beyond historical data.
+
+
+```{r, comment = NA}
+# Load necessary libraries
+library(quantmod)
+library(TTR)
+library(PerformanceAnalytics)
+library(xts)
+
+# Fetch historical stock price data
+symbols <- c("KO", "PEP")
+getSymbols(symbols, from = "2010-01-01", to = Sys.Date())
+
+# Extract adjusted closing prices
+ko_prices <- Cl(KO)
+pep_prices <- Cl(PEP)
+
+# Calculate the spread between KO and PEP
+spread <- ko_prices - pep_prices
+
+# Define the rolling window size for Z-score calculation
+window_size <- 60
+rolling_mean <- runMean(spread, n = window_size)
+rolling_sd <- runSD(spread, n = window_size)
+z_score <- (spread - rolling_mean) / rolling_sd
+
+# Split data into training and test sets (70% for training, 30% for testing)
+split_index <- floor(0.7 * length(z_score))
+z_score_train <- z_score[1:split_index]
+z_score_test <- z_score[(split_index + 1):length(z_score)]
+
+``` 
+
+* In the code, a transaction cost is set to 0.1% per trade. 
+
+* We set initial amount of money to start the strategy to 100,000.
+
+* We set the the number of shares to tradce for each signal to 100.
+
+* Created loop runs through the entire time series of Z-scores and applies the trading rules based on the thresholds set in the steps before.
+
+```{r, comment = NA}
+# Set initial capital and transaction cost
+capital <- 100000  # Initial capital
+transaction_cost <- 0.001  # 0.1% per trade
+position <- 0
+position_size <- 100
+pnl <- numeric(length(z_score_test))  # Array to track PnL
+
+# Backtesting trading logic on test data
+for (i in 2:length(z_score_test)) {
+  if (!is.na(z_score_test[i])) {
+    if (z_score_test[i] < -2 && position == 0) {
+      # Enter long position on KO, short on PEP
+      position <- position_size
+      pnl[i] <- pnl[i-1] - (Cl(KO)[split_index + i] * position_size * (1 + transaction_cost)) + 
+                 (Cl(PEP)[split_index + i] * position_size * (1 - transaction_cost))
+    } else if (z_score_test[i] > 2 && position == 0) {
+      # Enter short position on KO, long on PEP
+      position <- -position_size
+      pnl[i] <- pnl[i-1] + (Cl(KO)[split_index + i] * position_size * (1 - transaction_cost)) - 
+                 (Cl(PEP)[split_index + i] * position_size * (1 + transaction_cost))
+    } else if (abs(z_score_test[i]) < 0.5 && position != 0) {
+      # Exit position
+      pnl[i] <- pnl[i-1] + position * (Cl(KO)[split_index + i] - Cl(PEP)[split_index + i]) - 
+                 abs(position) * transaction_cost * (Cl(KO)[split_index + i] + Cl(PEP)[split_index + i]) / 2
+      position <- 0
+    } else {
+      pnl[i] <- pnl[i-1]  # No change in PnL if no action
+    }
+  }
+}
+
+# Convert pnl to a time series (xts object) using the appropriate date index
+date_index <- index(z_score_test)[-1]  # Adjust the index length to match pnl length
+pnl_ts <- xts(pnl[-1], order.by = date_index)
+
+# Calculate daily returns based on PnL changes
+daily_returns <- diff(pnl_ts) / lag(pnl_ts, k = 1)
+daily_returns <- na.omit(daily_returns)
+daily_returns <- daily_returns[is.finite(daily_returns)]
+```
+
+
+## **Performance Metrics**
+
+* **The Sharpe Ratio**: measures the risk-adjusted return.
+  + We scale the daily returns to annualized figure (= 252, for trading days in a year)
+  
+  + The Sharpe Ratio is NaN, which indicates that the returns having very little variability, leading to a standard deviation close to zero (dividing by zero or near-zero values can cause this).
+  
+  + The daily returns might also be consistently positive or negative but very small, so when scaled up to an annualized figure, the ratio results in NaN.
+  
+* **Max Drawdown:**  Shows the maximum loss experienced from the peak value, helping understand the risk of large losses.
+  
+* **Mean and Standard Deviation of Returns:**
+  + The mean return represents the average daily return of the strategy over the test period. In this case, the value is approximately 0.059% per day.
+  
+  + The standard deviation measures the volatility or risk of the daily returns. In this case, it is approximately 3.91%.
+
+These metrics provide insight into how profitable and risky the strategy would have been historically. 
+
+```{r, comment = NA}
+# Calculate performance metrics
+sharpe_ratio <- ifelse(sd(daily_returns) > 0, SharpeRatio.annualized(daily_returns, scale = 252), NA)
+max_drawdown <- maxDrawdown(daily_returns)
+
+# Print the performance metrics
+mean_return <- mean(daily_returns)
+sd_return <- sd(daily_returns)
+
+print(paste("Mean Return:", mean_return))
+print(paste("Standard Deviation:", sd_return))
+print(paste("Sharpe Ratio:", sharpe_ratio))
+print(paste("Max Drawdown:", max_drawdown))
+
+# Plot the cumulative PnL
+plot(pnl_ts, type = "l", main = "Cumulative PnL (Test Data)", col = "darkgreen")
+
+```
+
+## **Interpretation of the Cumulative PnL Plot**
+
+The plot shows the Cumulative PnL (Profit and Loss) of the pairs trading strategy over time. It is a critical part of the backtest that visualizes how the strategy performs as trades are executed based on the Z-score thresholds. 
+
+**1. Y-Axis (PnL):**
+
+* The y-axis represents the cumulative profit or loss in monetary units over time. Positive values indicate profit, while negative values indicate losses.
+
+* The range shows the volatility and profitability of the strategy, with the values fluctuating as trades are entered and exited.
+
+**2. X-Axis (Index):**
+
+* The x-axis represents the time or the sequence of trades/events. Each point corresponds to a time step in the dataset where the strategy might have entered or exited a trade.
+
+* It shows the progression of the strategy over the entire backtesting period.
+
+**3. Cumulative PnL Line (Green Line):**
+
+* The green line represents the cumulative profit or loss generated by the strategy. It moves up and down as trades are made based on the Z-score crossing the thresholds (±2) and subsequently reverting to the mean (Z-score returning to 0).
+
+* **Upward Movements:** When the line moves up, it indicates that the strategy has entered a profitable trade (the spread has reverted as expected).
+
+* **Downward Movements:** When the line dips, it shows that the strategy experienced a loss, potentially because the spread did not revert as expected or because of a false signal.
+
+**4. General Trend:**
+
+* The overall trend of the cumulative PnL line seems to be **upward**. This indicates that, despite some fluctuations and periods of loss, the strategy has been profitable overall. The cumulative PnL is increasing, suggesting that the strategy has successfully captured mean reversion opportunities over time.
+
+* The fluctuations (spikes up and down) show how volatile the strategy’s PnL is. This information is essential for risk management, as it shows how large the temporary losses can be even if the strategy is profitable overall. 
+
+## **Solving the Sharpe Ratio issue**
+
+To solve the NaN Sharpe ratio issue we lowered Z-Score Threshold:
+ 
+* Entry Threshold (z_score_entry): Adjusted to 1 from the original 2. This change makes the strategy more sensitive to smaller deviations from the mean, increasing the frequency of trades.
+
+* Exit Threshold (z_score_exit): Kept at 0.5 to maintain consistency for exiting trades when the spread reverts closer to the mean.
+
+By lowering the Z-score threshold, the strategy will likely generate more trades, providing variability in the daily returns. 
+
+**Sharpe Ratio: -0.00298465625030857**
+The Sharpe Ratio value of -0.00298 is close to zero, which indicates that the losses are relatively small. This suggests that while the strategy is unprofitable, it may not be losing a significant amount of money. 
+
+```{r, comment = NA}
+# Load necessary libraries
+library(quantmod)
+library(TTR)
+library(PerformanceAnalytics)
+library(xts)
+
+# Fetch historical stock price data
+symbols <- c("KO", "PEP")
+getSymbols(symbols, from = "2010-01-01", to = Sys.Date())
+
+# Extract adjusted closing prices
+ko_prices <- Cl(KO)
+pep_prices <- Cl(PEP)
+
+# Calculate the spread between KO and PEP
+spread <- ko_prices - pep_prices
+
+# Define the rolling window size for Z-score calculation
+window_size <- 60
+rolling_mean <- runMean(spread, n = window_size)
+rolling_sd <- runSD(spread, n = window_size)
+z_score <- (spread - rolling_mean) / rolling_sd
+
+# Adjust Z-score thresholds to generate more trading signals
+z_score_entry <- 1.00  # Entry threshold (lowered from 2)
+z_score_exit <- 0.5   # Exit threshold (unchanged)
+
+# Split data into training and test sets (70% for training, 30% for testing)
+split_index <- floor(0.7 * length(z_score))
+z_score_train <- z_score[1:split_index]
+z_score_test <- z_score[(split_index + 1):length(z_score)]
+
+# Set initial capital and transaction cost
+capital <- 100000  # Initial capital
+transaction_cost <- 0.001  # 0.1% per trade
+position <- 0
+position_size <- 100
+pnl <- numeric(length(z_score_test))  # Array to track PnL
+
+# Backtesting trading logic on test data
+for (i in 2:length(z_score_test)) {
+  if (!is.na(z_score_test[i])) {
+    if (z_score_test[i] < -z_score_entry && position == 0) {
+      # Enter long position on KO, short on PEP
+      position <- position_size
+      pnl[i] <- pnl[i-1] - (Cl(KO)[split_index + i] * position_size * (1 + transaction_cost)) + 
+                (Cl(PEP)[split_index + i] * position_size * (1 - transaction_cost))
+    } else if (z_score_test[i] > z_score_entry && position == 0) {
+      # Enter short position on KO, long on PEP
+      position <- -position_size
+      pnl[i] <- pnl[i-1] + (Cl(KO)[split_index + i] * position_size * (1 - transaction_cost)) - 
+                (Cl(PEP)[split_index + i] * position_size * (1 + transaction_cost))
+    } else if (abs(z_score_test[i]) < z_score_exit && position != 0) {
+      # Exit position
+      pnl[i] <- pnl[i-1] + position * (Cl(KO)[split_index + i] - Cl(PEP)[split_index + i]) - 
+                abs(position) * transaction_cost * (Cl(KO)[split_index + i] + Cl(PEP)[split_index + i]) / 2
+      position <- 0
+    } else {
+      pnl[i] <- pnl[i-1]  # No change in PnL if no action
+    }
+  }
+}
+
+# Adjust the length of pnl to match the index of z_score_test
+date_index <- index(z_score_test)[-1]  # Adjust the index length to match pnl length
+pnl_ts <- xts(pnl[-1], order.by = date_index)
+
+# Calculate daily returns based on PnL changes
+daily_returns <- diff(pnl_ts) / lag(pnl_ts, k = 1)
+daily_returns <- na.omit(daily_returns)
+daily_returns <- daily_returns[is.finite(daily_returns)]
+
+# Calculate performance metrics
+sharpe_ratio <- ifelse(sd(daily_returns) > 0, SharpeRatio.annualized(daily_returns, scale = 252), NA)
+max_drawdown <- maxDrawdown(daily_returns)
+
+# Print the performance metrics
+mean_return <- mean(daily_returns)
+sd_return <- sd(daily_returns)
+
+print(paste("Mean Return:", mean_return))
+print(paste("Standard Deviation:", sd_return))
+print(paste("Sharpe Ratio:", sharpe_ratio))
+print(paste("Max Drawdown:", max_drawdown))
+
+# Plot the cumulative PnL
+plot(pnl_ts, type = "l", main = "Cumulative PnL (Test Data)", col = "darkgreen")
+
+
+```
+
+# **Step 7: Incorporate Stop-Loss Levels**
+
+Define Stop-Loss Threshold:
+
+* We'll set a percentage loss limit, such as 2% of the capital per trade. If the loss on a trade exceeds this limit, the trade will be exited.
+
+```{r, comment = NA}
+# Set initial capital and transaction cost
+capital <- 100000  # Initial capital
+transaction_cost <- 0.001  # 0.1% per trade
+stop_loss_threshold <- 0.02 * capital  # 2% of capital per trade as stop-loss
+position <- 0
+position_size <- 100
+pnl <- numeric(length(z_score_test))  # Array to track PnL
+
+# Backtesting trading logic on test data
+for (i in 2:length(z_score_test)) {
+  if (!is.na(z_score_test[i])) {
+    # Enter long position on KO, short on PEP
+    if (z_score_test[i] < -2 && position == 0) {
+      position <- position_size
+      pnl[i] <- pnl[i-1] - (Cl(KO)[split_index + i] * position_size * (1 + transaction_cost)) +
+                (Cl(PEP)[split_index + i] * position_size * (1 - transaction_cost))
+    } 
+    # Enter short position on KO, long on PEP
+    else if (z_score_test[i] > 2 && position == 0) {
+      position <- -position_size
+      pnl[i] <- pnl[i-1] + (Cl(KO)[split_index + i] * position_size * (1 - transaction_cost)) -
+                (Cl(PEP)[split_index + i] * position_size * (1 + transaction_cost))
+    } 
+    # Exit position if z-score is near zero or stop-loss is hit
+    else if (abs(z_score_test[i]) < 0.5 && position != 0) {
+      # Calculate current loss/gain
+      current_pnl <- pnl[i-1] + position * (Cl(KO)[split_index + i] - Cl(PEP)[split_index + i]) - 
+                     abs(position) * transaction_cost * (Cl(KO)[split_index + i] + Cl(PEP)[split_index + i]) / 2
+      
+      # If loss exceeds stop-loss threshold, exit the trade
+      if (abs(current_pnl - pnl[i-1]) > stop_loss_threshold) {
+        pnl[i] <- pnl[i-1]  # No further change in PnL if stop-loss triggers
+        position <- 0
+      } else {
+        pnl[i] <- current_pnl
+        position <- 0
+      }
+    } else {
+      pnl[i] <- pnl[i-1]  # No change in PnL if no action
+    }
+  }
+}
+
+```
+
+```{r, comment = NA}
+# Load necessary libraries
+library(quantmod)
+library(TTR)
+library(PerformanceAnalytics)
+library(xts)
+
+# Fetch historical stock price data
+symbols <- c("KO", "PEP")
+getSymbols(symbols, from = "2010-01-01", to = Sys.Date())
+
+# Extract adjusted closing prices
+ko_prices <- Cl(KO)
+pep_prices <- Cl(PEP)
+
+# Calculate the spread between KO and PEP
+spread <- ko_prices - pep_prices
+
+# Define the rolling window size for Z-score calculation
+window_size <- 60
+rolling_mean <- runMean(spread, n = window_size)
+rolling_sd <- runSD(spread, n = window_size)
+z_score <- (spread - rolling_mean) / rolling_sd
+
+# Split data into training and test sets (70% for training, 30% for testing)
+split_index <- floor(0.7 * length(z_score))
+z_score_train <- z_score[1:split_index]
+z_score_test <- z_score[(split_index + 1):length(z_score)]
+
+# Set initial capital, transaction cost, and stop-loss threshold
+capital <- 100000  # Initial capital
+transaction_cost <- 0.001  # 0.1% per trade
+stop_loss_threshold <- 0.02 * capital  # 2% of capital per trade as stop-loss
+position <- 0
+position_size <- 100
+pnl <- numeric(length(z_score_test))  # Array to track PnL
+
+# Backtesting trading logic on test data
+for (i in 2:length(z_score_test)) {
+  if (!is.na(z_score_test[i])) {
+    # Enter long position on KO, short on PEP
+    if (z_score_test[i] < -2 && position == 0) {
+      position <- position_size
+      pnl[i] <- pnl[i-1] - (Cl(KO)[split_index + i] * position_size * (1 + transaction_cost)) + 
+                (Cl(PEP)[split_index + i] * position_size * (1 - transaction_cost))
+    } 
+    # Enter short position on KO, long on PEP
+    else if (z_score_test[i] > 2 && position == 0) {
+      position <- -position_size
+      pnl[i] <- pnl[i-1] + (Cl(KO)[split_index + i] * position_size * (1 - transaction_cost)) - 
+                (Cl(PEP)[split_index + i] * position_size * (1 + transaction_cost))
+    } 
+    # Exit position if z-score is near zero or stop-loss is hit
+    else if (abs(z_score_test[i]) < 0.5 && position != 0) {
+      # Calculate current loss/gain
+      current_pnl <- pnl[i-1] + position * (Cl(KO)[split_index + i] - Cl(PEP)[split_index + i]) - 
+                    abs(position) * transaction_cost * (Cl(KO)[split_index + i] + Cl(PEP)[split_index + i]) / 2
+      
+      # If loss exceeds stop-loss threshold, exit the trade
+      if (abs(current_pnl - pnl[i-1]) > stop_loss_threshold) {
+        pnl[i] <- pnl[i-1]  # No further change in PnL if stop-loss triggers
+        position <- 0
+      } else {
+        pnl[i] <- current_pnl
+        position <- 0
+      }
+    } else {
+      pnl[i] <- pnl[i-1]  # No change in PnL if no action
+    }
+  }
+}
+
+# Adjust the length of pnl to match the index of z_score_test
+date_index <- index(z_score_test)[-1]  # Adjust the index length to match pnl length
+pnl_ts <- xts(pnl[-1], order.by = date_index)
+
+# Calculate daily returns based on PnL changes
+daily_returns <- diff(pnl_ts) / lag(pnl_ts, k = 1)
+daily_returns <- na.omit(daily_returns)
+daily_returns <- daily_returns[is.finite(daily_returns)]
+
+# Calculate performance metrics
+sharpe_ratio <- ifelse(sd(daily_returns) > 0, SharpeRatio.annualized(daily_returns, scale = 252), NA)
+max_drawdown <- maxDrawdown(daily_returns)
+
+# Print the performance metrics
+mean_return <- mean(daily_returns)
+sd_return <- sd(daily_returns)
+
+print(paste("Mean Return:", mean_return))
+print(paste("Standard Deviation:", sd_return))
+print(paste("Sharpe Ratio:", sharpe_ratio))
+print(paste("Max Drawdown:", max_drawdown))
+
+# Plot the cumulative PnL
+plot(pnl_ts, type = "l", main = "Cumulative PnL with Stop-Loss (Test Data)", col = "darkgreen")
+```

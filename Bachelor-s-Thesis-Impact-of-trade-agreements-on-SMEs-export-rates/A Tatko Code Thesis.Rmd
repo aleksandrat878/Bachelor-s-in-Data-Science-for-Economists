@@ -1,0 +1,1732 @@
+---
+title: "The Impact of AANZFTA on SME Export Performance in ASEAN"
+author: "Aleksandra Tatko"
+date: "2025-06-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#1. Cleaning and Preparing Datasets
+
+## 1.1 Load Libraries and Import Raw Data
+```{r }
+#Loading all the necessary libraries 
+library(writexl)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(zoo)
+```
+
+```{r }
+#Import dataset with economic indicators
+wdi <- read_excel("P_Data_Extract_From_World_Development_Indicators.xlsx", sheet = "Data")
+wgi <- read_excel("P_Data_Extract_From_Worldwide_Governance_Indicators.xlsx", sheet = "Data")
+
+```
+
+## 1.2 Tidy and Transform WDI and WGI
+```{r }
+#Clean and Reshape the data so the values matches in both datasets
+reshape_data <- function(df) {
+  df_long <- df %>%
+    pivot_longer(
+      cols = matches("\\[YR\\d{4}\\]$"),   # matches columns like "2005 [YR2005]"
+      names_to = "Year",
+      values_to = "Value"
+    ) %>%
+    mutate(
+      Year = stringr::str_extract(Year, "\\d{4}"),     # extract the 4-digit year
+      Value = as.character(Value),                     # ensure Value is character
+      Value = na_if(Value, ".."),                      # treat ".." as NA
+      Value = na_if(Value, "—"),                       # treat em-dash as NA
+      Value = na_if(Value, "#N/A"),
+      Value = na_if(Value, "n/a"),
+      Value = as.numeric(Value)                        # safely convert to numeric
+    )
+  return(df_long)
+}
+
+wgi_long <- reshape_data(wgi)
+wdi_long <- reshape_data(wdi)
+
+```
+
+
+```{r }
+#Spread each indicator to wide format 
+wgi_wide <- wgi_long %>%
+  select(`Country Name`, Year, `Series Name`, Value) %>%
+  pivot_wider(names_from = `Series Name`, values_from = Value)
+
+
+wdi_wide <- wdi_long %>%
+  select(`Country Name`, Year, `Series Name`, Value) %>%
+  pivot_wider(names_from = `Series Name`, values_from = Value)
+```
+
+
+```{r}
+#Ensure each dataset has matching Country-Year combinations;  filtering all to only years 2005–2024
+target_countries <- c("Thailand", "Indonesia", "Viet Nam")
+target_years <- as.character(2005:2024)
+
+wgi_wide <- wgi_wide %>%
+  filter(`Country Name` %in% target_countries, Year %in% target_years)
+
+wdi_wide <- wdi_wide %>%
+  filter(`Country Name` %in% target_countries, Year %in% target_years)
+```
+
+## 1.3 Normalize Country Names
+```{r }
+#Make sure all the countries names are the same in all datasets
+normalize_country_names <- function(df) {
+  df %>%
+    mutate(`Country Name` = case_when(
+      `Country Name` %in% c("Viet Nam", "Vietnam") ~ "Vietnam",
+      `Country Name` == "Thailand" ~ "Thailand",
+      `Country Name` == "Indonesia" ~ "Indonesia",
+      TRUE ~ `Country Name`
+    ))
+}
+
+#Save up new dataset with aligned country names 
+wgi_wide <- normalize_country_names(wgi_wide)
+wdi_wide <- normalize_country_names(wdi_wide)
+```
+
+## 1.4 Merge with SME Indicators
+```{r }
+#Merge two datasets on country- year level
+merged_data <- list(wgi_wide, wdi_wide) %>%
+  reduce(full_join, by = c("Country Name", "Year"))
+```
+
+```{r }
+#Save the new dataset as an excel file
+write_xlsx(merged_data, "Merged_Indicators_Thesis.xlsx")
+```
+
+```{r}
+#Import 3rd dataset with SMEs indicators
+sme_data <- read_excel("SMEs Data.xlsx")
+merged_data <- read_excel("Merged_Indicators_Thesis.xlsx")
+```
+
+```{r}
+#Access the names of the variables in each dataset, to see on what basis can I merge them
+names(sme_data)
+names(merged_data)
+
+```
+
+```{r}
+#Make sure the "Country" variable is named the same way in each dataset
+merged_data <- merged_data %>%
+  rename(Country = `Country Name`)
+```
+
+
+```{r}
+#Change all the column names to character
+names(sme_data) <- sapply(names(sme_data), as.character)
+names(sme_data)
+```
+
+
+```{r}
+# Identify and convert year columns
+# First identify the year columns
+year_cols <- as.character(2007:2024)
+
+# Coerce only those year columns to character or numeric
+sme_data[year_cols] <- lapply(sme_data[year_cols], as.character)  # or as.numeric
+
+```
+
+
+```{r}
+# Pivot the dataset to long
+sme_long <- sme_data %>%
+  pivot_longer(
+    cols = all_of(as.character(2007:2024)),  # explicitly name years as strings
+    names_to = "Year",
+    values_to = "Value"
+  )
+
+```
+
+```{r}
+# Pivot the dataset to wide
+sme_ready <- sme_long %>%
+  pivot_wider(names_from = Item, values_from = Value)
+```
+
+## 1.5 Final Dataset Export
+```{r}
+#Merge all the datasets together
+final_dataset_uncleaned <- left_join(sme_ready, merged_data, by = c("Country", "Year"))
+
+write_xlsx(final_dataset_uncleaned, "final_merged_uncleaned.xlsx")
+
+```
+
+
+```{r}
+#Remove the variables where more than 60% of observations are missing
+final_dataset_cleaned <- final_dataset_uncleaned %>%
+  select(where(~ mean(!is.na(.)) > 0.6))  # keep columns with >60% non-missing
+```
+
+```{r}
+#Convert non-numeric columns (except Country and Year) into numeric
+# Step 1: Identify character columns to convert (excluding Country and Year)
+char_cols <- names(final_dataset_cleaned)[sapply(final_dataset_cleaned, is.character) & !(names(final_dataset_cleaned) %in% c("Country", "Year"))]
+
+# Step 2: Convert those to numeric with temporary "converted_" prefix
+final_dataset_cleaned <- final_dataset_cleaned %>%
+  mutate(across(all_of(char_cols), as.numeric, .names = "converted_{.col}"))
+
+# Step 3: Drop the original character columns (excluding Country and Year)
+final_dataset_cleaned <- final_dataset_cleaned %>% select(-all_of(char_cols))
+
+# Step 4: Rename converted columns to original names
+names(final_dataset_cleaned) <- gsub("^converted_", "", names(final_dataset_cleaned))
+
+# Step 5: Reorder to put Country and Year first
+final_dataset_cleaned <- final_dataset_cleaned %>% relocate(Country, Year)
+```
+
+
+```{r}
+#Creation of the AANZFTA dummy variable
+final_dataset_cleaned <- final_dataset_cleaned %>%
+  mutate(
+    AANZFTA = case_when(
+      Country %in% c("Vietnam", "Thailand") & Year < 2010 ~ 0,
+      Country %in% c("Vietnam", "Thailand") & Year >= 2010 ~ 1,
+      Country == "Indonesia" & Year < 2012 ~ 0,
+      Country == "Indonesia" & Year >= 2012 ~ 1,
+      TRUE ~ NA_real_  # fallback, just in case
+    )
+  ) %>%
+  relocate(AANZFTA, .before = `Control of Corruption: Estimate`)  # move it to the first column
+
+```
+
+```{r}
+#Cleaning NA Step 1: Time-Based Interpolation (for middle gaps)
+linear_regression_dataset_cleaned <- final_dataset_cleaned %>%
+  arrange(Country, Year) %>%
+  group_by(Country) %>%
+  mutate(across(where(is.numeric), ~ na.approx(., na.rm = FALSE)))
+```
+
+```{r}
+#Step 2: Median imputation (for start/end gaps)
+linear_regression_dataset_cleaned <- linear_regression_dataset_cleaned %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+
+```
+
+```{r}
+#Save up created dataset in xslx format
+write_xlsx(linear_regression_dataset_cleaned, "linear_regression_dataset_cleaned.xls")
+```
+
+#2. Descriptive Statistics and Diagnostics
+```{r}
+# Panel and Regression Analysis
+library(plm)
+library(lmtest)
+library(sandwich)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+
+# Summary and Table Formatting
+library(modelsummary)
+library(officer)
+library(flextable)
+library(corrr)
+```
+
+```{r}
+# Ensure correct data types
+linear_regression_dataset_cleaned$Country <- as.factor(linear_regression_dataset_cleaned$Country)
+linear_regression_dataset_cleaned$Year <- as.numeric(as.character(linear_regression_dataset_cleaned$Year))
+
+# Convert to panel data structure
+pdata <- pdata.frame(linear_regression_dataset_cleaned, index = c("Country", "Year"))
+summary(pdata)
+index(pdata)  # Confirm panel index
+
+```
+
+
+```{r}
+# Rename Key Variables for Clarity
+
+pdata <- pdata %>%
+  rename(
+    MSME_export = MSME.export..current.million.US..,
+    AANZFTA = AANZFTA,
+    Corruption = Control.of.Corruption..Estimate,
+    Gov_Effectiveness = Government.Effectiveness..Estimate,
+    Voice = Voice.and.Accountability..Estimate,
+    Political_Stability = Political.Stability.and.Absence.of.Violence.Terrorism..Estimate,
+    Regulatory_Quality = Regulatory.Quality..Estimate,
+    Rule_of_Law = Rule.of.Law..Estimate,
+    GDP_growth = GDP.growth..annual...,
+    Export_growth = Total.export.growth......calculated.WBD,
+    Inflation_consumer_price = Inflation..consumer.prices..annual...,
+    FDI_inflows_percent_of_GDP = Foreign.direct.investment..net.inflows....of.GDP.,
+    Education_spending_percent_of_GDP = Government.expenditure.on.education..total....of.GDP.,
+    MSME_growth = MSME.growth....,
+    Trade_openess = Trade....of.GDP.,
+    Total_exports= Exports.of.goods.and.services..current.million.US..
+  )
+
+# Add log-transformed MSME export variable
+pdata <- pdata %>%
+  mutate(
+    log_MSME_export = log(MSME_export + 1)  
+  )
+
+```
+
+## 2.1 Export Trends and Global Shocks
+```{r}
+# Global shocks analysis and visualization
+# Define AANZFTA implementation events
+aanzfta_events <- data.frame(
+  Event = c("AANZFTA (Thailand & Vietnam)", "AANZFTA (Indonesia)"),
+  Year = c(2010, 2012)
+)
+
+# Define global economic shocks
+shock_events <- data.frame(
+  shock = c("Global Financial Crisis", "China Slowdown", "COVID-19 Pandemic",
+            "US-China", "Russia–Ukraine War & Inflation"),
+  start = c(2008, 2014, 2020, 2018, 2022),
+  end =   c(2009, 2015, 2021, 2019, 2023)
+)
+
+# Set maximum y-value for annotation placement
+y_max <- max(pdata$Total_exports, na.rm = TRUE)
+
+# Ensure Year is numeric 
+pdata$Year <- as.numeric(as.character(pdata$Year))
+
+# Create plot
+ggplot(pdata, aes(x = Year, y = Total_exports, color = Country)) +
+  
+  # Global shocks
+  geom_rect(data = shock_events, inherit.aes = FALSE,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf, fill = shock),
+            alpha = 0.15, color = NA) +
+  
+  # Export trends
+ geom_line(size = 1.2) +
+geom_point(size = 1.5) +
+  
+  # AANZFTA vertical lines
+  geom_vline(data = aanzfta_events, aes(xintercept = Year),
+             linetype = "dashed", color = "black", linewidth = 0.9) +
+  
+  geom_text(data = aanzfta_events,
+            aes(x = Year, y = y_max * 0.98, label = Event),
+            angle = 90, vjust = -0.5, hjust = 1, size = 3.2, color = "black") +
+  
+  # Titles and labels
+  labs(
+    title = "Total Export Trends and Global Economic Shocks (2007–2024)",
+    subtitle = "With AANZFTA Implementation and Major Global Events",
+    x = "Year",
+    y = "Total Exports (US$ million)",
+    color = "Country",
+    fill = "Global Shock"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+
+```
+
+```{r}
+# Create Country-Specific Panel Data
+pdata_thailand <- as.data.frame(pdata) %>%
+  filter(Country == "Thailand") %>%
+  pdata.frame(index = c("Country", "Year"))
+
+pdata_vietnam <- as.data.frame(pdata) %>%
+  filter(Country == "Vietnam") %>%
+  pdata.frame(index = c("Country", "Year"))
+
+pdata_indonesia <- as.data.frame(pdata) %>%
+  filter(Country == "Indonesia") %>%
+  pdata.frame(index = c("Country", "Year"))
+
+```
+
+## 2.2 Summary Statistics
+```{r}
+
+# Step 1: Select relevant numeric variables
+vars_summary <- pdata %>%
+  select(
+    Year, AANZFTA, MSME_export, GDP_growth,
+    Export_growth, Inflation_consumer_price,
+    FDI_inflows_percent_of_GDP, Education_spending_percent_of_GDP,
+    Gov_Effectiveness, Corruption, Voice,
+    Political_Stability, Regulatory_Quality, Rule_of_Law
+  )
+
+# Step 2: Clean columns
+vars_summary_cleaned <- vars_summary %>%
+  # Remove columns that are all NA
+  select(where(~ !all(is.na(.)))) %>%
+  # Remove columns with fewer than 2 non-NA numeric values
+  select(where(~ sum(!is.na(.)) >= 2))
+
+# Step 3: Create and export the summary table to word doc
+datasummary(
+  formula = reformulate(termlabels = names(vars_summary_cleaned),
+                        response = "Mean + SD + Min + Median + Max + N"),
+  data = vars_summary_cleaned,
+  title = "Summary Statistics of Variables",
+  output = "summary_stats.docx"
+)
+
+```
+
+
+## 2.3 Correlation Matrix
+```{r}
+
+# Select relevant variables only
+cor_data <- pdata %>%
+  select(
+    MSME_export, AANZFTA, GDP_growth, Export_growth,
+    Inflation_consumer_price, FDI_inflows_percent_of_GDP,
+    Education_spending_percent_of_GDP, Gov_Effectiveness, Corruption, Voice,
+    Political_Stability, Regulatory_Quality, Rule_of_Law
+  )
+
+# Remove any zero-variance variables
+cor_data <- cor_data %>%
+  select(where(~ sd(., na.rm = TRUE) != 0))
+
+# Compute correlation matrix
+cor_matrix <- cor_data %>%
+  correlate(use = "pairwise.complete.obs") %>%
+  fashion(decimals = 2)
+
+# Convert to flextable with word formatting
+ft <- cor_matrix %>%
+  as_flextable() %>%
+  fontsize(size = 10, part = "all") %>%
+  font(fontname = "Times New Roman", part = "all") %>%
+  set_table_properties(layout = "autofit", width = .95) %>%  # scale to fit page
+  autofit()
+
+# Export to Word
+doc <- read_docx() %>%
+  body_add_par("1. Correlation Matrix", style = "heading 1") %>%
+  body_add_flextable(ft)
+
+print(doc, target = "correlation_matrix.docx")
+
+```
+# 3. Hypothesis Testing and Model Estimation
+
+## 3.1 Hypothesis 1: AANZFTA Main Effect
+### 3.1.1 Base Fixed Effects Model
+```{r}
+# Model H1: Base Fixed Effects Model without Interaction
+model_all <- plm(
+  log_MSME_export ~ AANZFTA + GDP_growth +  Inflation_consumer_price + Export_growth +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+
+# Heteroskedasticity-consistent standard errors (cluster-robust)
+coeftest(model_all, vcov = vcovHC(model_all, type = "HC1"))
+
+#AANZFTA is not significant, we move to test conditional relation
+
+```
+### 3.1.2 Interaction with GDP Growth
+```{r}
+
+# Model with interaction between AANZFTA and GDP growth
+model_interact <- plm(
+  log_MSME_export ~ AANZFTA * GDP_growth +  Inflation_consumer_price + Export_growth +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+
+ # Mean-centering AANZFTA and GDP growth, creating interaction term
+pdata <- pdata %>%
+  mutate(
+    GDP_growth_c = GDP_growth - mean(GDP_growth, na.rm = TRUE),
+    AANZFTA_c = AANZFTA - mean(AANZFTA, na.rm = TRUE),
+    interaction_term_h1 = GDP_growth_c * AANZFTA_c
+  )
+
+
+# Linear model equivalent of H1 for plotting purposes
+model_h1_lm <- lm(
+  log_MSME_export ~ AANZFTA_c * GDP_growth_c + 
+    Inflation_consumer_price + Export_growth + FDI_inflows_percent_of_GDP +
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata
+)
+
+
+summary(model_interact)
+# Interpretation: AANZFTA may only be effective under favorable macroeconomic conditions.
+```
+
+### 3.1.2 Checking wheter random effect model suits better as a model
+```{r, eval = FALSE}
+# Load required libraries
+library(plm)
+
+
+# Run the fixed effects model
+fe_model <- plm(log_MSME_export ~ AANZFTA_c * GDP_growth_c + 
+    Inflation_consumer_price + Export_growth + FDI_inflows_percent_of_GDP +
+    Education_spending_percent_of_GDP + MSME_growth, 
+                data = pdata, model = "within")
+
+# Run the random effects model
+re_model <- plm(log_MSME_export ~ AANZFTA_c * GDP_growth_c + 
+    Inflation_consumer_price + Export_growth + FDI_inflows_percent_of_GDP +
+    Education_spending_percent_of_GDP + MSME_growth,
+                data = pdata, model = "random")
+
+# Run the Hausman test
+hausman_test <- phtest(fe_model, re_model)
+print(hausman_test)
+
+#Due to the limited sample size this model is not working
+```
+
+
+### 3.1.3  Robustness Checks 
+#### Check for Multicollinearity in the FE Interaction Model
+```{r}
+# VIF from linear model equivalent
+library(car)
+model_lm <- lm(
+  log_MSME_export ~ AANZFTA * GDP_growth +  Inflation_consumer_price + Export_growth +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata
+)
+
+vif(model_lm)
+# Result: High VIF for interaction terms indicates multicollinearity
+
+```
+
+#### Center Variables to Reduce Multicollinearity
+```{r}
+# Mean-centering AANZFTA and GDP growth, creating interaction term
+pdata <- pdata %>%
+  mutate(
+    GDP_growth_c = GDP_growth - mean(GDP_growth, na.rm = TRUE),
+    AANZFTA_c = AANZFTA - mean(AANZFTA, na.rm = TRUE),
+    interaction_term_h1 = GDP_growth_c * AANZFTA_c
+  )
+
+# Re-estimate model with centered terms
+model_centered <- plm(
+  log_MSME_export ~ AANZFTA_c + GDP_growth_c + interaction_term_h1 + 
+    Inflation_consumer_price + Export_growth + FDI_inflows_percent_of_GDP + 
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+
+# VIF check (should now be acceptable)
+vif(lm(log_MSME_export ~ AANZFTA_c + GDP_growth_c + interaction_term_h1 + 
+         Inflation_consumer_price + Trade_openess + FDI_inflows_percent_of_GDP +
+         Education_spending_percent_of_GDP + MSME_growth, data = pdata))
+
+```
+
+```{r}
+#Visualize how Export would change across different GDP growth levels
+library(interactions)
+
+interact_plot(
+  model_h1_lm,
+  pred = AANZFTA_c,
+  modx = GDP_growth_c,
+  plot.points = TRUE,
+  interval = TRUE,
+  int.type = "confidence",
+  main.title = "Predicted SME Export Levels by AANZFTA Exposure Across GDP Growth Scenarios",
+  x.label = "AANZFTA (Centered)",
+  y.label = "Predicted SME Export (log scale)"
+)
+```
+
+#### Residual Diagnostics
+```{r}
+plot(resid(model_centered), main = "Residual Plot for H1 Model")
+hist(resid(model_centered), main = "Histogram of Residuals for H1 Model")
+
+```
+
+#### Validity Checks
+```{r}
+# Serial correlation (Wooldridge test)
+pwartest(model_centered)
+```
+
+```{r}
+# Fix serial correlation using Arellano-style standard errors
+coeftest(model_centered, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+```
+
+```{r}
+# Cross-sectional dependence test (Pesaran CD)
+pcdtest(model_centered, test = "cd")
+```
+
+```{r}
+# Time trend test (Year as fixed effect)
+model_trend <- plm(
+  log_MSME_export ~ AANZFTA_c + GDP_growth_c + interaction_term_h1 + 
+    Inflation_consumer_price + Export_growth + FDI_inflows_percent_of_GDP +
+    Education_spending_percent_of_GDP + MSME_growth + Year,
+  data = pdata,
+  model = "within"
+)
+
+coeftest(model_trend, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+# If Year is not significant, trend effects are not a concern
+
+```
+
+#### Final Model Output (H1)
+```{r}
+coeftest(model_centered, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+```
+
+
+```{r}
+# Robustness Check: Exclude Vietnam to assess sensitivity of H1 results
+
+# Create a filtered Vietnam dataset
+vietnam_data <- pdata %>% filter(Country == "Vietnam")
+
+# Create new proxy scenarios (assume +/- 10% and +/- 20% variation in SME employment share)
+vietnam_data <- vietnam_data %>%
+  mutate(
+    MSME_export_base = `Total_exports` * (`Number.of.employment.by.MSMEs` / `Number.of.employment..total`),
+    MSME_export_low10  = `Total_exports` * ((`Number.of.employment.by.MSMEs` * 0.9) / `Number.of.employment..total`),
+    MSME_export_high10 = `Total_exports` * ((`Number.of.employment.by.MSMEs` * 1.1) / `Number.of.employment..total`),
+    MSME_export_low20  = `Total_exports` * ((`Number.of.employment.by.MSMEs` * 0.8) / `Number.of.employment..total`), 
+    MSME_export_high20 = `Total_exports` * ((`Number.of.employment.by.MSMEs` * 1.2) / `Number.of.employment..total`)
+  )
+
+# Filter the dataset to exclude Vietnam
+pdata_no_vietnam <- pdata %>% 
+  filter(Country != "Vietnam") %>% 
+  pdata.frame(index = c("Country", "Year"))
+
+# Estimate the same model excluding Vietnam
+model_no_vietnam <- plm(
+  log_MSME_export ~ AANZFTA_c + GDP_growth_c + interaction_term_h1 + Inflation_consumer_price + Export_growth +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata_no_vietnam, model = "within"
+)
+
+# Cluster-robust standard errors
+coeftest(model_no_vietnam, vcov = vcovHC(model_no_vietnam, type = "HC1"))
+```
+
+
+```{r}
+# Robustness Check 2: Sensitivity Analysis with different Vietnamese SMEs export rate levels
+
+pdata_sens_high <- pdata
+pdata_sens_low <- pdata
+
+# Update SME exports ONLY for Vietnam rows
+pdata_sens_high$MSME_export[pdata_sens_high$Country == "Vietnam"] <- 
+  vietnam_data$MSME_export_high20
+
+pdata_sens_low$MSME_export[pdata_sens_low$Country == "Vietnam"] <- 
+  vietnam_data$MSME_export_low20
+
+# Log-transform
+pdata_sens_high$log_MSME_export <- log(pdata_sens_high$MSME_export + 1)
+pdata_sens_low$log_MSME_export <- log(pdata_sens_low$MSME_export + 1)
+
+```
+
+
+```{r}
+# Create models with high/ low employment rate scenarios
+pdata_sens_high <- pdata.frame(pdata_sens_high, index = c("Country", "Year"))
+pdata_sens_low <- pdata.frame(pdata_sens_low, index = c("Country", "Year"))
+
+
+model_sens_high <- plm(
+  log_MSME_export ~ AANZFTA_c + GDP_growth_c + interaction_term_h1 + 
+    Inflation_consumer_price + Export_growth + FDI_inflows_percent_of_GDP + 
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata_sens_high,
+  model = "within"
+)
+
+model_sens_low <- plm(
+  log_MSME_export ~ AANZFTA_c + GDP_growth_c + interaction_term_h1 + 
+    Inflation_consumer_price + Export_growth + FDI_inflows_percent_of_GDP + 
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata_sens_low,
+  model = "within"
+)
+
+coeftest(model_sens_high, vcov = function(x) vcovHC(x, type = "HC1", cluster = "group"))
+coeftest(model_sens_low, vcov = function(x) vcovHC(x, type = "HC1", cluster = "group"))
+
+
+```
+
+```{r}
+#Visulisation
+# Reshape for visual comparison
+vietnam_long <- vietnam_data %>%
+  select(Year, starts_with("MSME_export_")) %>%
+  pivot_longer(cols = starts_with("MSME_export_"), names_to = "Scenario", values_to = "ExportValue")
+
+# Plot
+ggplot(vietnam_long, aes(x = as.numeric(Year), y = ExportValue, color = Scenario)) +
+  geom_line(size = 1.1) +
+  labs(
+    title = "Sensitivity Analysis of Estimated SME Exports for Vietnam",
+    x = "Year",
+    y = "Estimated SME Exports (US$ million)",
+    color = "Assumption"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+# Robustness Check: reversed causality
+model_reverse <- plm(
+  GDP_growth ~ log_MSME_export + AANZFTA + Inflation_consumer_price + Export_growth + FDI_inflows_percent_of_GDP + 
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+coeftest(model_reverse, vcov = function(x) vcovHC(x, type = "HC1", cluster = "group"))
+```
+
+
+```{r}
+#Check model fit for final model H1
+summary(model_centered)$r.squared
+```
+
+## 3.1.4. Delayed Effect of AANZFTA
+
+### Step 1: Create Lagged AANZFTA Variables and Interactions
+```{r}
+# Create lagged AANZFTA variables by country
+pdata <- pdata %>%
+  group_by(Country) %>%
+  mutate(
+    AANZFTA_lag1 = lag(AANZFTA, 1),
+    AANZFTA_lag2 = lag(AANZFTA, 2),
+    AANZFTA_lag3 = lag(AANZFTA, 3)
+  ) %>%
+  ungroup()
+
+# Center and interact lagged variables with GDP_growth_c
+pdata <- pdata %>%
+  mutate(
+    AANZFTA_lag1_c = AANZFTA_lag1 - mean(AANZFTA_lag1, na.rm = TRUE),
+    AANZFTA_lag2_c = AANZFTA_lag2 - mean(AANZFTA_lag2, na.rm = TRUE),
+    AANZFTA_lag3_c = AANZFTA_lag3 - mean(AANZFTA_lag3, na.rm = TRUE),
+    interaction_lag1_h1 = AANZFTA_lag1_c * GDP_growth_c,
+    interaction_lag2_h1 = AANZFTA_lag2_c * GDP_growth_c,
+    interaction_lag3_h1 = AANZFTA_lag3_c * GDP_growth_c
+  )
+
+```
+
+#### Step 2: Estimate Panel Models with 1–3 Year Lags
+
+```{r}
+# Run fixed effects panel regressions with Arellano robust SEs
+model_lag1 <- plm(
+  log_MSME_export ~ AANZFTA_lag1_c + GDP_growth_c + interaction_lag1_h1 +
+    Export_growth  + Inflation_consumer_price + FDI_inflows_percent_of_GDP +
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+
+model_lag2 <- plm(
+  log_MSME_export ~ AANZFTA_lag2_c + GDP_growth_c + interaction_lag2_h1 +
+    Export_growth  + Inflation_consumer_price + FDI_inflows_percent_of_GDP +
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+
+model_lag3 <- plm(
+  log_MSME_export ~ AANZFTA_lag3_c + GDP_growth_c + interaction_lag3_h1 +
+    Export_growth  + Inflation_consumer_price + FDI_inflows_percent_of_GDP +
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+
+# Display results
+coeftest(model_lag1, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+coeftest(model_lag2, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+coeftest(model_lag3, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+```
+
+
+#### Step 3: Visualize Marginal Effects (Interaction Plots)
+```{r}
+library(interactions)
+
+# Convert to lm to enable plotting
+model_lag1_lm <- lm(log_MSME_export ~ AANZFTA_lag1_c * GDP_growth_c + Export_growth  +
+                      Inflation_consumer_price + FDI_inflows_percent_of_GDP +
+                      Education_spending_percent_of_GDP + MSME_growth, data = pdata)
+
+model_lag2_lm <- lm(log_MSME_export ~ AANZFTA_lag2_c * GDP_growth_c + Export_growth  +
+                      Inflation_consumer_price + FDI_inflows_percent_of_GDP +
+                      Education_spending_percent_of_GDP + MSME_growth, data = pdata)
+
+model_lag3_lm <- lm(log_MSME_export ~ AANZFTA_lag3_c * GDP_growth_c + Export_growth  +
+                      Inflation_consumer_price + FDI_inflows_percent_of_GDP +
+                      Education_spending_percent_of_GDP + MSME_growth, data = pdata)
+
+# Plot marginal effects
+interact_plot(model_lag1_lm, pred = AANZFTA_lag1_c, modx = GDP_growth_c,
+              plot.points = TRUE, interval = TRUE,
+              main.title = "Marginal Effect of AANZFTA on SME Exports (Lag 1)",
+              x.label = "AANZFTA (Lag 1)", y.label = "Predicted SME Exports")
+
+interact_plot(model_lag2_lm, pred = AANZFTA_lag2_c, modx = GDP_growth_c,
+              plot.points = TRUE, interval = TRUE,
+              main.title = "Marginal Effect of AANZFTA on SME Exports (Lag 2)",
+              x.label = "AANZFTA (Lag 2)", y.label = "Predicted SME Exports")
+
+interact_plot(model_lag3_lm, pred = AANZFTA_lag3_c, modx = GDP_growth_c,
+              plot.points = TRUE, interval = TRUE,
+              main.title = "Marginal Effect of AANZFTA on SME Exports (Lag 3)",
+              x.label = "AANZFTA (Lag 3)", y.label = "Predicted SME Exports")
+
+# The plots support my idea that the impact of AANZFTA on SME exports may persist beyond the first year—but the incremental difference between year 2 and 3 might be small (thus differences in a graphs are marginal)
+
+
+```
+
+```{r}
+#Create a Marginal Effect of AANZFTA on SME Exports Across GDP Growth graph
+
+# Define model coefficients from your output
+beta_AANZFTA_lag <- -0.2372219      # coefficient on AANZFTA_lagX_c
+beta_interaction <- 0.1704677       # coefficient on AANZFTA_lagX_c × GDP_growth_c
+
+# Define a sequence of centered GDP growth values
+gdp_seq <- seq(-5, 5, length.out = 300)
+
+# Create data frame with marginal effects for each lag
+plot_data <- data.frame(
+  GDP_growth_c = rep(gdp_seq, times = 3),
+  Marginal_Effect = c(
+    beta_AANZFTA_lag + beta_interaction * gdp_seq,  # Lag 1
+    beta_AANZFTA_lag + beta_interaction * gdp_seq,  # Lag 2
+    beta_AANZFTA_lag + beta_interaction * gdp_seq   # Lag 3
+  ),
+  Lag = factor(rep(c("Lag 1", "Lag 2", "Lag 3"), each = length(gdp_seq)))
+)
+
+# Plot using ggplot2
+ggplot(plot_data, aes(x = GDP_growth_c, y = Marginal_Effect, color = Lag, linetype = Lag)) +
+  geom_line(size = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  labs(
+    title = "Marginal Effect of AANZFTA on SME Exports Across GDP Growth",
+    subtitle = "Comparison of Lagged Interaction Terms (1–3 Years)",
+    x = "GDP Growth (Centered)",
+    y = "Marginal Effect of AANZFTA",
+    color = "Lag Year",
+    linetype = "Lag Year",
+    caption = "Note: Effect is conditional on GDP growth. Threshold at GDP ≈ 1.39%."
+  ) +
+  scale_color_manual(values = c("blue", "darkgreen", "red")) +
+  theme_minimal(base_size = 13)
+```
+
+
+
+### 3.1.5 Event Study: Estimate how MSME exports respond in years before and after AANZFTA was implemented in each country. (Alternative Approach)
+
+```{r}
+# STEP 1: Ensure Year is numeric
+pdata$Year <- as.numeric(as.character(pdata$Year))
+
+# STEP 2: Create event-time variable: years since AANZFTA implementation
+pdata <- pdata %>%
+  mutate(year_since_aanzfta = case_when(
+    Country == "Thailand"  ~ Year - 2010,
+    Country == "Vietnam"   ~ Year - 2010,
+    Country == "Indonesia" ~ Year - 2012,
+    TRUE ~ NA_real_
+  ))
+
+# STEP 3: Create dummy variables for each event year, excluding -1 as base year
+for (i in -4:5) {
+  if (i != -1) {
+    varname <- paste0("event_", ifelse(i < 0, "lead", "lag"), abs(i))
+    pdata[[varname]] <- as.numeric(pdata$year_since_aanzfta == i)
+  }
+}
+
+# STEP 4: Automatically select all event dummies
+event_vars <- grep("^event_", names(pdata), value = TRUE)
+
+# STEP 5: Create full formula dynamically with all control variables
+formula_event <- as.formula(paste(
+  "log_MSME_export ~", 
+  paste(event_vars, collapse = " + "),
+  "+ GDP_growth + Export_growth + Inflation_consumer_price + 
+     FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth"
+))
+
+# STEP 6: Estimate the fixed effects event study model
+library(plm)
+model_event <- plm(formula_event, data = pdata, model = "within")
+
+# STEP 7: Cluster-robust standard errors (Arellano style)
+library(lmtest)
+library(sandwich)
+coeftest(model_event, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+
+#There is no statistically significant impact of AANZFTA on SME exports in any year before, during, or after the agreement. This suggests no delayed or dynamic treatment effect — at least not captured in this specification.
+
+#This does not support the hypothesis of a delayed impact. The effect is either absent, too small, or too diffuse to detect in this model.
+```
+
+```{r}
+# Visualization 
+# Plotting the event-study coefficients
+library(broom)
+library(ggplot2)
+
+event_coefs <- tidy(model_event, conf.int = TRUE) %>%
+  filter(grepl("^event_", term)) %>%
+  mutate(
+    event_time = case_when(
+      grepl("lead", term) ~ -as.numeric(gsub("\\D", "", term)),
+      grepl("lag", term) ~  as.numeric(gsub("\\D", "", term)),
+      TRUE ~ NA_real_
+    )
+  )
+
+ggplot(event_coefs, aes(x = event_time, y = estimate)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Extended Event Study: AANZFTA Effects on log(SME Exports)",
+    x = "Years Since AANZFTA Implementation",
+    y = "Coefficient Estimate (vs. Year -1)"
+  ) +
+  theme_minimal()
+
+  
+```
+
+### 3.1.6 H1: Testing Non-Linear Relationship (GDP Growth × AANZFTA) (Testing whether FTA only helps up to a certain level of GDP growth)
+
+#### Step 1: Add squared and interaction squared terms
+```{r}
+pdata <- pdata %>%
+  mutate(
+    AANZFTA_sq = AANZFTA_c^2,
+    GDP_growth_sq = GDP_growth_c^2,
+    interaction_term_h1 = AANZFTA_c * GDP_growth_c,
+    interaction_sq_h1 = AANZFTA_c * GDP_growth_sq
+  )
+
+```
+
+
+####  Step 2: Estimate Non-Linear Fixed Effects Panel Model
+```{r}
+model_nonlinear_h1 <- plm(
+  log_MSME_export ~ AANZFTA_c + GDP_growth_c + interaction_term_h1 +
+    AANZFTA_sq + GDP_growth_sq + interaction_sq_h1 +
+    Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+coeftest(model_nonlinear_h1, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+```
+
+#### Step 3: Validity Checks
+```{r}
+# Multicollinearity
+library(car)
+vif(lm(log_MSME_export ~ GDP_growth_c + GDP_growth_sq + 
+          Export_growth + Inflation_consumer_price + 
+         FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + 
+         MSME_growth, data = pdata))
+
+# Serial Correlation
+pwartest(model_nonlinear_h1)
+
+# Cross-Sectional Dependence
+pcdtest(model_nonlinear_h1, test = "cd")
+```
+
+
+```{r}
+# Apply robust standard errors clustered by group to fix serial correlation and look at the results
+coeftest(model_nonlinear_h1, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+# The squared GDP growth term is negative and significant.
+```
+
+```{r}
+# Load required library
+library(ggplot2)
+
+beta_AANZFTA <- -0.2372       # coefficient on AANZFTA_c
+beta_interaction <- 0.1705    # coefficient on AANZFTA_c × GDP_growth_c
+
+# Calculate threshold GDP where marginal effect = 0
+gdp_threshold <- -beta_AANZFTA / beta_interaction
+
+# Generate GDP growth values (centered)
+gdp_seq <- seq(-5, 5, length.out = 300)
+
+# Compute marginal effects of AANZFTA across GDP growth
+marginal_effect <- beta_AANZFTA + beta_interaction * gdp_seq
+
+# Create dataframe for plotting
+df_plot <- data.frame(
+  GDP_growth_c = gdp_seq,
+  Marginal_Effect = marginal_effect
+)
+
+# Plot
+ggplot(df_plot, aes(x = GDP_growth_c, y = Marginal_Effect)) +
+  geom_line(color = "#2c7fb8", size = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = gdp_threshold, linetype = "dotted", color = "red", linewidth = 1.1) +
+  annotate("text", x = gdp_threshold + 0.2, y = max(marginal_effect)*0.9,
+           label = paste0("Threshold at GDP = ", round(gdp_threshold, 2)), color = "red", hjust = 0) +
+  labs(
+    title = "Marginal Effect of AANZFTA on SME Exports (Linear Interaction Model)",
+    subtitle = "Effect of AANZFTA varies by GDP growth",
+    x = "GDP Growth (Centered)",
+    y = "Marginal Effect of AANZFTA",
+    caption = "Note: Threshold is where AANZFTA impact switches from negative to positive."
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+```{r}
+#Non-linear visualization
+
+b1 <- -0.69465    # AANZFTA_c
+b3 <- 0.36768     # AANZFTA_c × GDP_growth_c
+b5 <- 0.0677132   # AANZFTA_c × GDP_growth_c^2
+
+# Create sequence of centered GDP growth values
+gdp_seq <- seq(-10, 10, length.out = 300)
+
+# Calculate marginal effects of AANZFTA across GDP growth values
+marginal_effect <- b1 + b3 * gdp_seq + b5 * gdp_seq^2
+
+# Combine into dataframe
+marginal_data <- data.frame(
+  GDP_growth_c = gdp_seq,
+  Marginal_Effect = marginal_effect
+)
+
+# Calculate turning point
+turning_point <- -b3 / (2 * b5)
+
+# Plot
+ggplot(marginal_data, aes(x = GDP_growth_c, y = Marginal_Effect)) +
+  geom_line(color = "#b2182b", size = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  geom_vline(xintercept = turning_point, linetype = "dotted", color = "blue", linewidth = 1) +
+  annotate("text", x = turning_point + 0.5, y = max(marginal_effect)*0.9,
+           label = paste0("Max effect at GDP = ", round(turning_point, 2)), color = "blue") +
+  labs(
+    title = "Marginal Effect of AANZFTA on SME Exports Across GDP Growth",
+    subtitle = "Based on Nonlinear Interaction Model",
+    x = "GDP Growth (Centered)",
+    y = "Marginal Effect of AANZFTA",
+    caption = "Source: Thesis Estimation, Model H1"
+  ) +
+  theme_minimal(base_size = 13)
+```
+  
+
+#### Step 4: Plot Predicted SME Exports — Linear vs Nonlinear Model
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(plm)
+
+# Generate GDP growth sequence
+gdp_seq <- seq(min(pdata$GDP_growth_c, na.rm = TRUE),
+               max(pdata$GDP_growth_c, na.rm = TRUE), length.out = 100)
+
+# Prediction dataset with average values
+predict_data <- data.frame(
+  Country = rep("Dummy", 100),
+  Year = seq(2000, 2099),
+  AANZFTA_c = 0,
+  GDP_growth_c = gdp_seq,
+  Export_growth = mean(pdata$Export_growth, na.rm = TRUE),
+  Inflation_consumer_price = mean(pdata$Inflation_consumer_price, na.rm = TRUE),
+  FDI_inflows_percent_of_GDP = mean(pdata$FDI_inflows_percent_of_GDP, na.rm = TRUE),
+  Education_spending_percent_of_GDP = mean(pdata$Education_spending_percent_of_GDP, na.rm = TRUE),
+  MSME_growth = mean(pdata$MSME_growth, na.rm = TRUE)
+)
+
+# Add interaction/squared terms
+predict_data <- predict_data %>%
+  mutate(
+    interaction_term_h1 = AANZFTA_c * GDP_growth_c,
+    GDP_growth_sq = GDP_growth_c^2,
+    AANZFTA_sq = AANZFTA_c^2,
+    interaction_sq_h1 = AANZFTA_c * GDP_growth_sq
+  )
+
+# Convert to panel structure
+predict_data <- pdata.frame(predict_data, index = c("Country", "Year"))
+
+# Refit as linear models for visualization
+model_centered_lm <- lm(log_MSME_export ~ AANZFTA_c + GDP_growth_c + interaction_term_h1 +
+                          Export_growth + Inflation_consumer_price +
+                          FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+                        data = pdata)
+
+model_nonlinear_lm <- lm(log_MSME_export ~ AANZFTA_c + GDP_growth_c + GDP_growth_sq +
+                           Export_growth + Inflation_consumer_price +
+                           FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+                         data = pdata)
+
+# Predict
+predict_data$pred_linear <- predict(model_centered_lm, newdata = predict_data)
+predict_data$pred_nonlinear <- predict(model_nonlinear_lm, newdata = predict_data)
+
+# Visualize
+ggplot(predict_data, aes(x = GDP_growth_c)) +
+  geom_line(aes(y = pred_linear, color = "Linear Model"), size = 1.2) +
+  geom_line(aes(y = pred_nonlinear, color = "Nonlinear Model"), size = 1.2, linetype = "dashed") +
+  labs(
+    title = "Predicted SME Exports Across GDP Growth",
+    x = "GDP Growth (Centered)",
+    y = "Predicted SME Export",
+    color = "Model Type"
+  ) +
+  scale_color_manual(values = c("Linear Model" = "#2c7fb8", "Nonlinear Model" = "#f03b20")) +
+  theme_minimal()
+
+```
+
+
+
+---
+
+## 3.2 Hypothesis 2: Institutional Moderation
+
+### Create Governance Index (initial approach - pooled WGI indicators)
+
+```{r}
+#Creating a Govenance Index variable by pooling 6 Governance Indicators Variables
+pdata <- pdata %>%
+  mutate(Governance_Index = rowMeans(across(
+    c(Corruption,
+      Gov_Effectiveness,
+      Voice,
+      Political_Stability,
+      Regulatory_Quality,
+      Rule_of_Law),
+    ~ as.numeric(.)
+  ), na.rm = TRUE))
+```
+
+
+###  Model Specification for H2: Pooled Model
+```{r}
+# I created 3 different model to access which government support proxy is the most suitable for my analysis.
+
+# Creating a model with Governance Index
+model_interact_index <- plm(
+  log_MSME_export ~ AANZFTA * Governance_Index + GDP_growth + Export_growth + 
+    Inflation_consumer_price + FDI_inflows_percent_of_GDP + 
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+
+coeftest(model_interact_index, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+# Creating a model with Regulatory Quality Variable
+model_interact_reg <- plm(
+  log_MSME_export ~ AANZFTA * Regulatory_Quality + GDP_growth + Export_growth + 
+    Inflation_consumer_price + FDI_inflows_percent_of_GDP + 
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+
+coeftest(model_interact_reg, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+# Creating a model with Government Effectiveness Variable
+model_interact_gov <- plm(
+  log_MSME_export ~ AANZFTA * Gov_Effectiveness + GDP_growth + Export_growth +
+    Inflation_consumer_price + FDI_inflows_percent_of_GDP +
+    Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+
+# Cluster-robust standard errors
+coeftest(model_interact_gov, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+# Results:
+# Model 1: The magnitude is high, but interpretation is more abstract because it's an average of six different dimensions.
+# Model 2: Conceptually focused: regulatory quality links directly to business ease, legal enforcement, and policy consistency. (Best balance of interpretability and statistical strength.)
+# Model 3: Broader than regulatory quality — includes delivery of public services and bureaucracy. (Still valid, but less specifically aligned with trade facilitation.)
+
+```
+
+### Moving on with Model 2: Regulatory Quality Proxy
+#### Step 1: Mean-Centering and Interaction Term Creation
+```{r}
+# Centering variables to reduce multicollinearity
+pdata <- pdata %>%
+  mutate(
+    Regulatory_Quality_c = Regulatory_Quality - mean(Regulatory_Quality, na.rm = TRUE),
+    AANZFTA_c = AANZFTA - mean(AANZFTA, na.rm = TRUE),
+    interaction_term_h2 = AANZFTA_c * Regulatory_Quality_c
+  )
+```
+
+#### Step 2: Multicollinearity Check (VIF)
+```{r}
+# Check multicollinearity using standard lm
+model_h2_centered_lm <- lm(
+  log_MSME_export ~ AANZFTA_c + Regulatory_Quality_c + interaction_term_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata
+)
+
+vif(model_h2_centered_lm)
+
+```
+
+#### Step 3: Fixed Effects Panel Model with Clustered Robust SEs
+```{r}
+# Main model for Hypothesis 2 with clustered SEs
+model_h2_centered <- plm(
+  log_MSME_export ~ AANZFTA_c + Regulatory_Quality_c + interaction_term_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata,
+  model = "within"
+)
+
+# Robust SEs (Arellano method)
+coeftest(model_h2_centered, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+
+# Fit linear model (used for plotting)
+model_h2_lm <- lm(
+  log_MSME_export ~ AANZFTA_c * Regulatory_Quality_c +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata
+)
+
+
+# Step 3: Plot marginal effect of AANZFTA across Regulatory Quality
+library(interactions)
+
+interact_plot(
+  model_h2_lm,
+  pred = AANZFTA_c,                    # AANZFTA on x-axis
+  modx = Regulatory_Quality_c,        # Reg. quality as moderator
+  plot.points = TRUE,
+  interval = TRUE,
+  int.type = "confidence",
+  main.title = "Predicted SME Export Levels across different Institutional Quality scenarios",
+  x.label = "AANZFTA (Centered)",
+  y.label = "Predicted SME Exports (log scale)"
+) 
+  
+
+
+```
+
+#### Step 4: Serial Correlation Test and Cross- Sectional Dependance Test
+```{r}
+# Test for autocorrelation, fixed with arellano style robust errors
+pwartest(model_h2_centered)
+
+# Test for cross-sectional dependence
+pcdtest(model_h2_centered, test = "cd")
+
+
+```
+
+#### Step 5: Time Trend Test
+```{r}
+# Add year to control for potential time trends
+model_h2_trend <- plm(
+  log_MSME_export ~ AANZFTA_c + Regulatory_Quality_c + interaction_term_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth +
+    Year,
+  data = pdata,
+  model = "within"
+)
+
+coeftest(model_h2_trend, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+# Conclusion: If Year is insignificant, model is not confounded by time trends.
+
+# There is no consistent or systematic year effect, so time trend does not appear to confound my main findings. This supports my earlier decision not to include year fixed effects in the final H2 model.
+```
+
+#### Final Output for H2
+```{r}
+# Final robust summary
+coeftest(model_h2_centered, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+summary(model_h2_centered)$r.squared
+```
+
+```{r}
+#H2 visualization
+# Load library
+library(ggplot2)
+
+# Define coefficients from H2 linear model output
+beta_AANZFTA <- -0.3386       # Coefficient on AANZFTA_c
+beta_interaction <- -1.2762   # Coefficient on AANZFTA_c × Regulatory_Quality_c
+
+# Calculate threshold: when marginal effect of AANZFTA turns zero
+reg_threshold <- -beta_AANZFTA / beta_interaction
+
+# Create sequence of centered regulatory quality values
+reg_seq <- seq(-2.5, 2.5, length.out = 300)
+
+# Calculate marginal effect of AANZFTA across regulatory quality
+marginal_effect <- beta_AANZFTA + beta_interaction * reg_seq
+
+# Create plot dataframe
+df_plot <- data.frame(
+  Regulatory_Quality_c = reg_seq,
+  Marginal_Effect = marginal_effect
+)
+
+# Plot the threshold
+ggplot(df_plot, aes(x = Regulatory_Quality_c, y = Marginal_Effect)) +
+  geom_line(color = "#2c7fb8", size = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  geom_vline(xintercept = reg_threshold, linetype = "dotted", color = "red", linewidth = 1) +
+  annotate("text", x = reg_threshold + 0.3, y = max(marginal_effect) * 0.9,
+           label = paste0("Threshold at Reg. Quality = ", round(reg_threshold, 2)),
+           color = "red", hjust = 0) +
+  labs(
+    title = "Marginal Effect of AANZFTA on SME Exports (Linear Interaction with Regulatory Quality)",
+    subtitle = "Effect of AANZFTA varies by institutional environment",
+    x = "Regulatory Quality (Centered)",
+    y = "Marginal Effect of AANZFTA",
+    caption = "Note: Threshold is where AANZFTA impact switches from negative to positive."
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+### 3.2.2 Nonlinear Interaction
+
+```{r}
+# Step 1: Create centered squared terms and nonlinear interaction
+pdata <- pdata %>%
+  mutate(
+    Regulatory_Quality_c = Regulatory_Quality - mean(Regulatory_Quality, na.rm = TRUE),
+    AANZFTA_c = AANZFTA - mean(AANZFTA, na.rm = TRUE),
+    AANZFTA_sq = AANZFTA_c^2,
+    Reg_Quality_sq = Regulatory_Quality_c^2,
+    interaction_term_h2 = AANZFTA_c * Regulatory_Quality_c,
+    interaction_sq_h2 = AANZFTA_c * Reg_Quality_sq
+  )
+
+
+# Step 2: Estimate non-linear interaction model
+model_h2_nonlinear <- plm(
+  log_MSME_export ~ AANZFTA_c + Regulatory_Quality_c + interaction_term_h2 +
+    AANZFTA_sq + Reg_Quality_sq + interaction_sq_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP +
+    MSME_growth,
+  data = pdata, model = "within"
+)
+
+# Cluster-robust SEs
+coeftest(model_h2_nonlinear, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+```
+
+
+```{r}
+# Multicollinearity check
+library(car)
+
+vif_model_h2 <- lm(
+  log_MSME_export ~ AANZFTA_c + Regulatory_Quality_c + Reg_Quality_sq +
+    interaction_term_h2 + interaction_sq_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata
+)
+
+vif(vif_model_h2)
+
+# Serial correlation test (Wooldridge)
+pwartest(model_h2_nonlinear)
+
+# Cross-sectional dependence (Pesaran CD test)
+pcdtest(model_h2_nonlinear, test = "cd")
+
+```
+
+```{r}
+#visualization
+b1 <- -0.2454         # AANZFTA_c
+b3 <- -1.2843         # AANZFTA_c × Regulatory_Quality_c
+b5 <- -1.3230         # AANZFTA_c × Reg_Quality_sq (not significant, but included for completeness)
+
+# Create sequence of centered regulatory quality values
+reg_seq <- seq(-2.5, 2.5, length.out = 300)
+
+# Compute marginal effects of AANZFTA across regulatory quality
+marginal_effect <- b1 + b3 * reg_seq + b5 * reg_seq^2
+
+# Create dataframe for ggplot
+threshold_data <- data.frame(
+  Regulatory_Quality_c = reg_seq,
+  Marginal_Effect = marginal_effect
+)
+
+# Find turning point (threshold)
+turning_point <- -b3 / (2 * b5)
+
+# Plot
+ggplot(threshold_data, aes(x = Regulatory_Quality_c, y = Marginal_Effect)) +
+  geom_line(color = "#b2182b", size = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  geom_vline(xintercept = turning_point, linetype = "dotted", color = "blue", linewidth = 1) +
+  annotate("text", x = turning_point + 0.3, y = max(marginal_effect, na.rm = TRUE) * 0.9,
+           label = paste0("Threshold at Reg. Quality = ", round(turning_point, 2)),
+           color = "blue", hjust = 0) +
+  labs(
+    title = "Marginal Effect of AANZFTA on SME Exports Across Regulatory Quality",
+    subtitle = "Based on Nonlinear Interaction Model",
+    x = "Regulatory Quality (Centered)",
+    y = "Marginal Effect of AANZFTA",
+    caption = "Note: The threshold effect is based on model estimates but should be interpreted with caution due to the statistical insignificance of the nonlinear interaction term."
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+```{r}
+#Avarge GDP growth in a sample
+mean(pdata$GDP_growth, na.rm = TRUE)
+```
+
+
+```{r}
+#Linear vs non-linear model effect comparison
+# Prediction dataset
+reg_seq <- seq(
+  min(pdata$Regulatory_Quality_c, na.rm = TRUE),
+  max(pdata$Regulatory_Quality_c, na.rm = TRUE),
+  length.out = 100
+)
+
+predict_data <- data.frame(
+  Country = rep("Dummy", 100),
+  Year = seq(2000, 2099),
+  AANZFTA_c = 0,  # at average level
+  Regulatory_Quality_c = reg_seq,
+  GDP_growth = mean(pdata$GDP_growth, na.rm = TRUE),
+  Export_growth = mean(pdata$Export_growth, na.rm = TRUE),
+  Inflation_consumer_price = mean(pdata$Inflation_consumer_price, na.rm = TRUE),
+  FDI_inflows_percent_of_GDP = mean(pdata$FDI_inflows_percent_of_GDP, na.rm = TRUE),
+  Education_spending_percent_of_GDP = mean(pdata$Education_spending_percent_of_GDP, na.rm = TRUE),
+  MSME_growth = mean(pdata$MSME_growth, na.rm = TRUE)
+)
+
+# Add terms for prediction
+predict_data <- predict_data %>%
+  mutate(
+    Reg_Quality_sq = Regulatory_Quality_c^2,
+    interaction_term_h2 = AANZFTA_c * Regulatory_Quality_c,
+    interaction_sq_h2 = AANZFTA_c * Reg_Quality_sq
+  )
+
+# Fit models as linear (for plotting)
+model_linear_h2_lm <- lm(
+  log_MSME_export ~ AANZFTA_c + Regulatory_Quality_c + interaction_term_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata
+)
+
+model_nonlinear_h2_lm <- lm(
+  log_MSME_export ~ AANZFTA_c + Regulatory_Quality_c + Reg_Quality_sq +
+    interaction_term_h2 + interaction_sq_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata
+)
+
+# Predict
+predict_data$pred_linear <- predict(model_linear_h2_lm, newdata = predict_data)
+predict_data$pred_nonlinear <- predict(model_nonlinear_h2_lm, newdata = predict_data)
+
+# Plot
+ggplot(predict_data, aes(x = Regulatory_Quality_c)) +
+  geom_line(aes(y = pred_linear, color = "Linear Model"), size = 1.2) +
+  geom_line(aes(y = pred_nonlinear, color = "Nonlinear Model"), size = 1.2, linetype = "dashed") +
+  labs(
+    title = "Predicted SME Exports Across Regulatory Quality",
+    x = "Regulatory Quality (Centered)",
+    y = "Predicted SME Export (log scale)",
+    color = "Model Type"
+  ) +
+  scale_color_manual(values = c("Linear Model" = "#2c7fb8", "Nonlinear Model" = "#f03b20")) +
+  theme_minimal(base_size = 13)
+
+```
+
+
+### 3.2.3 Delayed Effects (1, 2, 3-year lagged AANZFTA interaction with Regulatory Quality)
+
+```{r}
+# Generate lagged AANZFTA variables
+pdata <- pdata %>%
+  group_by(Country) %>%
+  mutate(
+    AANZFTA_lag1 = lag(AANZFTA, 1),
+    AANZFTA_lag2 = lag(AANZFTA, 2),
+    AANZFTA_lag3 = lag(AANZFTA, 3)
+  ) %>%
+  ungroup()
+
+```
+
+
+```{r}
+# Center lagged variables and create interaction terms
+pdata <- pdata %>%
+  mutate(
+    AANZFTA_lag1_c = AANZFTA_lag1 - mean(AANZFTA_lag1, na.rm = TRUE),
+    AANZFTA_lag2_c = AANZFTA_lag2 - mean(AANZFTA_lag2, na.rm = TRUE),
+    AANZFTA_lag3_c = AANZFTA_lag3 - mean(AANZFTA_lag3, na.rm = TRUE),
+
+    interaction_lag1_h2 = AANZFTA_lag1_c * Regulatory_Quality_c,
+    interaction_lag2_h2 = AANZFTA_lag2_c * Regulatory_Quality_c,
+    interaction_lag3_h2 = AANZFTA_lag3_c * Regulatory_Quality_c
+  )
+
+```
+
+
+```{r}
+# Estimate lagged models
+
+# 1-year lag model
+model_h2_lag1 <- plm(
+  log_MSME_export ~ AANZFTA_lag1_c + Regulatory_Quality_c + interaction_lag1_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+coeftest(model_h2_lag1, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+# 2-year lag model
+model_h2_lag2 <- plm(
+  log_MSME_export ~ AANZFTA_lag2_c + Regulatory_Quality_c + interaction_lag2_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+coeftest(model_h2_lag2, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+# 3-year lag model
+model_h2_lag3 <- plm(
+  log_MSME_export ~ AANZFTA_lag3_c + Regulatory_Quality_c + interaction_lag3_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata, model = "within"
+)
+coeftest(model_h2_lag3, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+```
+
+```{r}
+# Robustness: Multicollinearity (VIF)
+library(car)
+vif_lag_model <- lm(
+  log_MSME_export ~ AANZFTA_lag1_c + Regulatory_Quality_c + interaction_lag1_h2 +
+    GDP_growth + Export_growth + Inflation_consumer_price +
+    FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth,
+  data = pdata
+)
+vif(vif_lag_model)
+
+# Robustness: Serial Correlation
+pwartest(model_h2_lag1)
+
+# Robustness: Cross-sectional Dependence
+pcdtest(model_h2_lag1, test = "cd")
+```
+
+```{r}
+# Convert models for plotting
+model_h2_lag1_lm <- lm(log_MSME_export ~ AANZFTA_lag1_c * Regulatory_Quality_c +
+                         GDP_growth + Export_growth + Inflation_consumer_price +
+                         FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP +
+                         MSME_growth,
+                       data = pdata)
+
+model_h2_lag2_lm <- lm(log_MSME_export ~ AANZFTA_lag2_c * Regulatory_Quality_c +
+                         GDP_growth + Export_growth + Inflation_consumer_price +
+                         FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP +
+                         MSME_growth,
+                       data = pdata)
+
+model_h2_lag3_lm <- lm(log_MSME_export ~ AANZFTA_lag3_c * Regulatory_Quality_c +
+                         GDP_growth + Export_growth + Inflation_consumer_price +
+                         FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP +
+                         MSME_growth,
+                       data = pdata)
+```
+
+```{r}
+library(interactions)
+
+# Lag 1
+interact_plot(model_h2_lag1_lm, pred = AANZFTA_lag1_c, modx = Regulatory_Quality_c,
+              plot.points = TRUE, interval = TRUE,
+              main.title = "Marginal Effect of AANZFTA on SME Exports (Lag 1)",
+              x.label = "AANZFTA (Lag 1, Centered)", y.label = "Predicted SME Exports")
+
+# Lag 2
+interact_plot(model_h2_lag2_lm, pred = AANZFTA_lag2_c, modx = Regulatory_Quality_c,
+              plot.points = TRUE, interval = TRUE,
+              main.title = "Marginal Effect of AANZFTA on SME Exports (Lag 2)",
+              x.label = "AANZFTA (Lag 2, Centered)", y.label = "Predicted SME Exports")
+
+# Lag 3
+interact_plot(model_h2_lag3_lm, pred = AANZFTA_lag3_c, modx = Regulatory_Quality_c,
+              plot.points = TRUE, interval = TRUE,
+              main.title = "Marginal Effect of AANZFTA on SME Exports (Lag 3)",
+              x.label = "AANZFTA (Lag 3, Centered)", y.label = "Predicted SME Exports")
+```
+
+
+### 3.2.4 Event study Model
+
+```{r}
+# Step 1: Center Regulatory Quality
+pdata <- pdata %>%
+  mutate(Regulatory_Quality_c = Regulatory_Quality - mean(Regulatory_Quality, na.rm = TRUE))
+
+# Step 2: Create event-time dummies and interaction terms
+for (i in -4:5) {
+  if (i != -1) {
+    event_var <- paste0("event_", ifelse(i < 0, "lead", "lag"), abs(i))
+    pdata[[event_var]] <- as.numeric(pdata$year_since_aanzfta == i)
+    
+    # Create interaction with Regulatory Quality
+    pdata[[paste0(event_var, "_int")]] <- pdata[[event_var]] * pdata$Regulatory_Quality_c
+  }
+}
+
+# Step 3: Build regression formula dynamically
+event_interaction_vars <- grep("^event_.*_int$", names(pdata), value = TRUE)
+
+formula_event_int <- as.formula(paste(
+  "log_MSME_export ~", 
+  paste(event_interaction_vars, collapse = " + "),
+  "+ Regulatory_Quality_c + GDP_growth + Export_growth + Inflation_consumer_price + 
+     FDI_inflows_percent_of_GDP + Education_spending_percent_of_GDP + MSME_growth"
+))
+
+# Estimate the panel model
+model_event_h2 <- plm(formula_event_int, data = pdata, model = "within")
+
+# Cluster-robust SEs
+coeftest(model_event_h2, vcov = function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group"))
+
+# Robustness: Serial Correlation
+pwartest(model_event_h2)
+
+# Robustness: Cross-sectional Dependence
+pcdtest(model_event_h2, test = "cd")
+```
+
+
+```{r}
+# visualization
+library(broom)
+
+event_int_coefs <- tidy(model_event_h2, conf.int = TRUE) %>%
+  filter(grepl("^event_.*_int$", term)) %>%
+  mutate(
+    event_time = case_when(
+      grepl("lead", term) ~ -as.numeric(gsub("\\D", "", term)),
+      grepl("lag", term)  ~  as.numeric(gsub("\\D", "", term)),
+      TRUE ~ NA_real_
+    )
+  )
+
+ggplot(event_int_coefs, aes(x = event_time, y = estimate)) +
+  geom_point(size = 2, color = "darkblue") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2, color = "darkblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey30") +
+  labs(
+    title = "Dynamic Moderation Effect of Regulatory Quality on AANZFTA Impact",
+    x = "Years Since AANZFTA Implementation",
+    y = "Interaction Effect (AANZFTA × Regulatory Quality)",
+    caption = "Baseline year (-1) omitted. Effects are relative to it."
+  ) +
+  theme_minimal(base_size = 13)
+```

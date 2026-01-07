@@ -1,0 +1,73 @@
+---
+title: "Project Sustainable Finance"
+author: "Aleksandra Tatko"
+date: "2024-05-31"
+output: html_document
+---
+
+```{r setup}
+# First, we installed and loaded the WDI package, as well as all the necessary libraries
+library(WDI)
+library(tidyverse)
+library(ggplot2)
+
+```
+
+
+```{r}
+#Then we defined the countries and indicators
+countries <- c("IN", "BR", "ZA", "ID")
+indicators <- c("NY.GDP.MKTP.KD.ZG",  # GDP growth (annual %)
+                "EG.FEC.RNEW.ZS")     # Renewable energy (% of total final energy consumption)
+
+# Next, we downloaded the data
+data <- WDI(country = countries, indicator = indicators, start = 2010, end = 2020)
+
+
+#Renamed the columns for easier reference
+names(data) <- c( "country", "iso2c", "iso3c", "year", "gdp_growth", "renewable_energy")
+
+#And ommitted the missing values
+data <- na.omit(data)
+
+#Eventually, we saved the data to a CSV file
+write.csv(data, "world_bank_data.csv", row.names = FALSE)
+
+
+```
+
+```{r}
+#We created the initial plot that shows the annual GDP Growth Over Time for selected countries
+ ggplot(data, aes(x = year, y = gdp_growth, color = country)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  labs(title = "GDP Growth Over Time",
+       x = "Year",
+       y = "GDP Growth (annual %)") +
+      scale_x_continuous(breaks = seq(2010, 2020, by = 1)) +
+  theme_minimal()
+
+```
+
+```{r}
+#Then ,we created the line plot for Renewable Energy Share over time
+ggplot(data, aes(x = year, y = renewable_energy, color = country)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Renewable Energy Share Over Time",
+       x = "Year",
+       y = "Renewable Energy (% of total final energy consumption)") +
+      scale_x_continuous(breaks = seq(2010, 2020, by = 1)) +
+  theme_minimal()
+```
+
+```{r}
+# And eventually we created the scatter plot to compare GDP Growth and Renewable Energy Share
+ggplot(data, aes(x = gdp_growth, y = renewable_energy, color = country)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  labs(title = "GDP Growth vs Renewable Energy Share",
+       x = "GDP Growth (annual %)",
+       y = "Renewable Energy (% of total final energy consumption)") +
+  theme_minimal()
+```
